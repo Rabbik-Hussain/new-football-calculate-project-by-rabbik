@@ -3,6 +3,9 @@
    File: status.css
    Premium dark responsive styling for #statistics
 ========================================================= */
+html{
+    scroll-behavior: smooth;
+}
 
 #statistics.matchcraft-statistics {
   --st-bg: #101827;

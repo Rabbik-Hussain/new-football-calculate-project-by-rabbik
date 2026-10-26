@@ -705,21 +705,94 @@
       : fixture.groundName || fixture.venue || "Ground not set";
   }
 
-  function getFixtureScore(fixture) {
-    const homeScore = fixture.homeScore ?? fixture.homeGoals;
-    const awayScore = fixture.awayScore ?? fixture.awayGoals;
+ function getFixtureScore(fixture) {
+    const homeScore =
+        fixture?.homeScore ??
+        fixture?.scoreHome ??
+        fixture?.homeGoals;
 
-    if (homeScore !== null && homeScore !== undefined &&
-        awayScore !== null && awayScore !== undefined) {
-      return `${Number(homeScore)} - ${Number(awayScore)}`;
+    const awayScore =
+        fixture?.awayScore ??
+        fixture?.scoreAway ??
+        fixture?.awayGoals;
+
+    const hasMainScore =
+        homeScore !== undefined &&
+        homeScore !== null &&
+        homeScore !== "" &&
+        awayScore !== undefined &&
+        awayScore !== null &&
+        awayScore !== "";
+
+    if (hasMainScore) {
+        return `${homeScore} – ${awayScore}`;
     }
 
-    if (fixture.score && typeof fixture.score === "string") {
-      return fixture.score;
+    return String(fixture?.score ?? "").trim() || "VS";
+}
+
+function getFixturePenaltyMarkup(fixture) {
+    if (!fixture) return "";
+
+    const homeScore = Number(
+        fixture.homeScore ?? fixture.scoreHome ?? fixture.homeGoals
+    );
+
+    const awayScore = Number(
+        fixture.awayScore ?? fixture.scoreAway ?? fixture.awayGoals
+    );
+
+    const homePenaltyRaw =
+        fixture.penaltyHomeScore ??
+        fixture.homePenaltyScore ??
+        fixture.penaltyScoreHome;
+
+    const awayPenaltyRaw =
+        fixture.penaltyAwayScore ??
+        fixture.awayPenaltyScore ??
+        fixture.penaltyScoreAway;
+
+    const penaltyFlag = [
+        fixture.penaltyShootout,
+        fixture.hasPenaltyShootout,
+        fixture.penaltyShootoutEnabled
+    ].some(value =>
+        value === true ||
+        String(value).toLowerCase() === "true"
+    );
+
+    if (
+        !penaltyFlag ||
+        !Number.isFinite(homeScore) ||
+        !Number.isFinite(awayScore) ||
+        homeScore !== awayScore ||
+        homePenaltyRaw === undefined ||
+        homePenaltyRaw === null ||
+        homePenaltyRaw === "" ||
+        awayPenaltyRaw === undefined ||
+        awayPenaltyRaw === null ||
+        awayPenaltyRaw === ""
+    ) {
+        return "";
     }
 
-    return "VS";
-  }
+    const homePenalty = Number(homePenaltyRaw);
+    const awayPenalty = Number(awayPenaltyRaw);
+
+    if (
+        !Number.isFinite(homePenalty) ||
+        !Number.isFinite(awayPenalty) ||
+        homePenalty === awayPenalty
+    ) {
+        return "";
+    }
+
+    return `
+        <small class="mc-fixture-penalty-score">
+            (${homePenalty} – ${awayPenalty})
+        </small>
+    `;
+}
 
   function fixtureMatchesSearch(fixture, query) {
     if (!query) return true;
@@ -771,6 +844,7 @@
     const groundName = getFixtureGroundName(fixture);
     const status = statusClass(fixture.status);
     const score = getFixtureScore(fixture);
+    const penaltyMarkup = getFixturePenaltyMarkup(fixture);
 
     const completed = status === "completed";
     const cancelled = status === "cancelled";
@@ -802,8 +876,9 @@
           </div>
 
           <div class="fixtures-vs">
-            ${escapeHTML(score)}
-          </div>
+    <span>${escapeHTML(score)}</span>
+    ${penaltyMarkup}
+</div>
 
           <div class="fixtures-team">
             <div class="fixtures-team-logo-placeholder"
@@ -1296,49 +1371,131 @@
     const fixtures = getFixtures();
 
     const matchFixtureId =
-      match.fixtureId ??
-      match.scheduledFixtureId ??
-      match.sourceFixtureId;
+        match.fixtureId ??
+        match.scheduledFixtureId ??
+        match.sourceFixtureId;
 
     let index = matchFixtureId
-      ? fixtures.findIndex(fixture =>
-          String(fixture.id) === String(matchFixtureId)
+        ? fixtures.findIndex(fixture =>
+            String(fixture.id) === String(matchFixtureId) ||
+            String(fixture.fixtureId ?? "") === String(matchFixtureId)
         )
-      : -1;
+        : -1;
 
-    // Fallback: match by teams and scheduled date.
+    // Fallback: একই টুর্নামেন্ট, দল এবং তারিখের ম্যাচ খুঁজবে।
     if (index < 0 && match.homeTeamId && match.awayTeamId) {
-      index = fixtures.findIndex(fixture =>
-        String(fixture.homeTeamId) === String(match.homeTeamId) &&
-        String(fixture.awayTeamId) === String(match.awayTeamId) &&
-        (!match.date || fixture.date === match.date)
-      );
+        index = fixtures.findIndex(fixture => {
+            const sameTeams =
+                String(fixture.homeTeamId) === String(match.homeTeamId) &&
+                String(fixture.awayTeamId) === String(match.awayTeamId);
+
+            const sameTournament =
+                !match.tournamentId ||
+                !fixture.tournamentId ||
+                String(fixture.tournamentId) === String(match.tournamentId);
+
+            const sameDate =
+                !match.date || fixture.date === match.date;
+
+            return sameTeams && sameTournament && sameDate;
+        });
     }
 
     if (index < 0) return;
 
     const fixture = fixtures[index];
 
-    const homeScore = match.homeScore ?? match.homeGoals;
-    const awayScore = match.awayScore ?? match.awayGoals;
+    const homeRaw = match.homeScore ?? match.homeGoals;
+    const awayRaw = match.awayScore ?? match.awayGoals;
 
     if (
-      homeScore === undefined || homeScore === null ||
-      awayScore === undefined || awayScore === null
+        homeRaw === undefined || homeRaw === null || homeRaw === "" ||
+        awayRaw === undefined || awayRaw === null || awayRaw === ""
     ) {
-      return;
+        return;
     }
 
-    fixture.homeScore = Number(homeScore);
-    fixture.awayScore = Number(awayScore);
-    fixture.score = `${Number(homeScore)} - ${Number(awayScore)}`;
+    const homeScore = Number(homeRaw);
+    const awayScore = Number(awayRaw);
+
+    if (
+        !Number.isFinite(homeScore) ||
+        !Number.isFinite(awayScore) ||
+        homeScore < 0 ||
+        awayScore < 0
+    ) {
+        return;
+    }
+
+    fixture.homeScore = homeScore;
+    fixture.awayScore = awayScore;
+    fixture.score = `${homeScore} - ${awayScore}`;
     fixture.status = "completed";
-    fixture.completedAt = match.completedAt || new Date().toISOString();
+    fixture.matchStatus = "Full-Time";
+    fixture.resultSaved = true;
+    fixture.completedAt =
+        match.completedAt || fixture.completedAt || new Date().toISOString();
     fixture.updatedAt = new Date().toISOString();
+
+    // পেনাল্টি কেবল সমান মূল স্কোরের ম্যাচে সংরক্ষণ করো।
+    if (homeScore === awayScore) {
+        const penaltyHomeRaw =
+            match.penaltyHomeScore ??
+            match.homePenaltyScore ??
+            match.penaltyScoreHome;
+
+        const penaltyAwayRaw =
+            match.penaltyAwayScore ??
+            match.awayPenaltyScore ??
+            match.penaltyScoreAway;
+
+        const hasPenaltyData =
+            penaltyHomeRaw !== undefined &&
+            penaltyHomeRaw !== null &&
+            penaltyHomeRaw !== "" &&
+            penaltyAwayRaw !== undefined &&
+            penaltyAwayRaw !== null &&
+            penaltyAwayRaw !== "";
+
+        if (hasPenaltyData) {
+            const penaltyHome = Number(penaltyHomeRaw);
+            const penaltyAway = Number(penaltyAwayRaw);
+
+            if (
+                Number.isFinite(penaltyHome) &&
+                Number.isFinite(penaltyAway) &&
+                penaltyHome !== penaltyAway
+            ) {
+                fixture.penaltyShootout = true;
+                fixture.penaltyHomeScore = penaltyHome;
+                fixture.penaltyAwayScore = penaltyAway;
+
+                fixture.penaltyWinner =
+                    match.penaltyWinner ??
+                    (penaltyHome > penaltyAway ? "home" : "away");
+
+                fixture.penaltyWinnerTeamId =
+                    match.penaltyWinnerTeamId ??
+                    match.penaltyWinnerId ??
+                    (
+                        fixture.penaltyWinner === "home"
+                            ? fixture.homeTeamId
+                            : fixture.awayTeamId
+                    );
+            }
+        }
+    } else {
+        // মূল স্কোর আর ড্র না থাকলে আগের পেনাল্টির তথ্য সরাও।
+        fixture.penaltyShootout = false;
+        fixture.penaltyHomeScore = null;
+        fixture.penaltyAwayScore = null;
+        fixture.penaltyWinner = null;
+        fixture.penaltyWinnerTeamId = null;
+    }
 
     persistFixtures(fixtures);
     renderFixtures();
-  }
+}
 
   function handleMatchUpdate(event) {
     const detail = event?.detail;

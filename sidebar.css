@@ -5,6 +5,10 @@
     font-family: 'Poppins', sans-serif;
 }
 
+html{
+    scroll-behavior: smooth;
+}
+
 .main-box {
     position: relative;
     background: url("image/football.jpg") center center / cover no-repeat;

@@ -4,6 +4,10 @@
    Premium Dark Responsive Design
    ========================================================== */
 
+   html{
+    scroll-behavior: smooth;
+}
+
 #standings,
 #brackets,
 #bracat {

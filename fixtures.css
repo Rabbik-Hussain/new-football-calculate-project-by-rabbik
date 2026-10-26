@@ -5,6 +5,9 @@
    ========================================================== */
 
 /* ---------- Base / Page ---------- */
+html{
+    scroll-behavior: smooth;
+}
 
 #fixtures {
   --fx-bg: #0b1020;
@@ -1077,4 +1080,15 @@
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+}
+
+
+.mc-fixture-penalty-score {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.78em;
+  line-height: 1.4;
+  font-weight: 600;
+  opacity: 0.85;
+  white-space: nowrap;
 }

@@ -6,6 +6,9 @@
 ========================================================= */
 
 /* ---------- Theme Variables ---------- */
+html{
+    scroll-behavior: smooth;
+}
 
 #matches {
     --mc-bg: #0b1120;
@@ -2132,4 +2135,24 @@
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
+}
+
+
+.mc-match-penalty-result {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin: 6px 0 10px;
+    text-align: center;
+}
+
+.mc-match-penalty-score {
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.mc-match-penalty-winner {
+    font-size: 0.8rem;
+    opacity: 0.85;
 }

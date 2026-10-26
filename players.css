@@ -1,7 +1,9 @@
 /* ========================================
    MATCHCRAFT - PLAYER MANAGEMENT
 ======================================== */
-
+html{
+    scroll-behavior: smooth;
+}
 .players-content {
     width: 100%;
     min-height: 100vh;

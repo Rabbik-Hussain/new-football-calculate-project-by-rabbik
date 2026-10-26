@@ -3692,6 +3692,7 @@ function syncFixtureResult(session) {
         renderEventPlayerOptions();
         mcRenderPenaltyPlayerOptions();
         mcRenderPenalty(session);
+        mcRenderPenaltyResultScore(session);
 
         $("#mcEventForm").querySelectorAll("input, select, button")
             .forEach(control => {
@@ -4389,64 +4390,186 @@ if (liveCard) {
     /* -------------------- Render: Full-Time Result -------------------- */
 
     function renderFullTimeResult(session) {
-        const container = $("#mcFullTimeResult");
+    const container = $("#mcFullTimeResult");
+    if (!container || !session) return;
 
-        if (session.status !== "full-time") {
-            container.innerHTML = `
-                <div class="mc-match-empty">
-                    <div class="mc-match-empty-icon">
-                        <i class="fa-solid fa-hourglass-half"></i>
-                    </div>
-                    <h3 class="mc-match-empty-title">
-                        ${escapeHTML(statusLabel(session.status))}
-                    </h3>
-                    <p class="mc-match-empty-text">
-                        The result will be finalized after the administrator
-                        confirms Full-Time.
-                    </p>
-                </div>
-            `;
-            return;
-        }
-
-        let outcome = "Match Drawn";
-
-        if (session.homeScore > session.awayScore) {
-            outcome = `${session.homeTeamName} Win`;
-        } else if (session.awayScore > session.homeScore) {
-            outcome = `${session.awayTeamName} Win`;
-        }
-
+    if (session.status !== "full-time") {
         container.innerHTML = `
-            <div class="mc-match-fulltime-result">
-                <p class="mc-match-fulltime-label">FULL-TIME</p>
-
-                <div class="mc-match-fulltime-score">
-                    <span>${Number(session.homeScore)}</span>
-                    <span class="mc-match-fulltime-separator">-</span>
-                    <span>${Number(session.awayScore)}</span>
+            <div class="mc-match-empty">
+                <div class="mc-match-empty-icon">
+                    <i class="fa-solid fa-hourglass-half"></i>
                 </div>
-
-                <p class="mc-match-fulltime-winner">
-                    ${escapeHTML(outcome)}
+                <h3 class="mc-match-empty-title">
+                    ${escapeHTML(statusLabel(session.status))}
+                </h3>
+                <p class="mc-match-empty-text">
+                    The result will be finalized after the administrator
+                    confirms Full-Time.
                 </p>
-
-                <div class="mc-match-champion-label">
-                    <i class="fa-solid fa-flag-checkered"></i>
-                    Final result saved
-                </div>
-
-                <div class="mc-match-actions" style="justify-content:center">
-                    <button type="button"
-                            class="mc-match-btn mc-match-btn--secondary"
-                            id="mcShowLineup">
-                        <i class="fa-solid fa-people-group"></i>
-                        View Lineups
-                    </button>
-                </div>
             </div>
         `;
+        return;
     }
+
+    let outcome = "Match Drawn";
+
+    if (Number(session.homeScore) > Number(session.awayScore)) {
+        outcome = `${session.homeTeamName} Win`;
+    } else if (Number(session.awayScore) > Number(session.homeScore)) {
+        outcome = `${session.awayTeamName} Win`;
+    }
+
+    let penaltyMarkup = "";
+
+    if (
+        Number(session.homeScore) === Number(session.awayScore) &&
+        typeof mcGetPenaltyState === "function"
+    ) {
+        const penaltyState = mcGetPenaltyState(session);
+
+        if (
+            penaltyState?.started &&
+            penaltyState?.winner &&
+            Array.isArray(penaltyState.home) &&
+            Array.isArray(penaltyState.away)
+        ) {
+            const homePenalty = penaltyState.home.filter(
+                shot => shot?.goal === true
+            ).length;
+
+            const awayPenalty = penaltyState.away.filter(
+                shot => shot?.goal === true
+            ).length;
+
+            const penaltyWinnerName =
+                penaltyState.winner === "home"
+                    ? session.homeTeamName
+                    : session.awayTeamName;
+
+            penaltyMarkup = `
+                <div class="mc-match-penalty-result">
+                    <span class="mc-match-penalty-score">
+                        Penalties (${homePenalty} – ${awayPenalty})
+                    </span>
+                    <span class="mc-match-penalty-winner">
+                        Penalty winner: ${escapeHTML(penaltyWinnerName)}
+                    </span>
+                </div>
+            `;
+        }
+    }
+
+    container.innerHTML = `
+        <div class="mc-match-fulltime-result">
+            <p class="mc-match-fulltime-label">FULL-TIME</p>
+
+            <div class="mc-match-fulltime-score">
+                <span>${Number(session.homeScore)}</span>
+                <span class="mc-match-fulltime-separator">-</span>
+                <span>${Number(session.awayScore)}</span>
+            </div>
+
+            ${penaltyMarkup}
+
+            <p class="mc-match-fulltime-winner">
+                ${escapeHTML(outcome)}
+            </p>
+
+            <div class="mc-match-champion-label">
+                <i class="fa-solid fa-flag-checkered"></i>
+                Final result saved
+            </div>
+
+            <div class="mc-match-actions" style="justify-content:center">
+                <button type="button"
+                        class="mc-match-btn mc-match-btn--secondary"
+                        id="mcShowLineup">
+                    <i class="fa-solid fa-people-group"></i>
+                    View Lineups
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+    function mcRenderPenaltyResultScore(session) {
+  const host = document.querySelector("#mcFullTimeResult");
+  if (!host || !session) return;
+
+  let scoreLine = host.querySelector(".mc-penalty-result-score");
+
+  const removeScoreLine = () => {
+    if (scoreLine) scoreLine.remove();
+  };
+
+  const status = String(
+    session.status ?? session.matchStatus ?? ""
+  ).toLowerCase().replace(/[\s_-]/g, "");
+
+  const isFullTime = [
+    "fulltime",
+    "completed",
+    "complete",
+    "finished",
+    "ft"
+  ].includes(status);
+
+  const homeScore = Number(session.homeScore);
+  const awayScore = Number(session.awayScore);
+
+  if (
+    !isFullTime ||
+    !Number.isFinite(homeScore) ||
+    !Number.isFinite(awayScore) ||
+    homeScore !== awayScore
+  ) {
+    removeScoreLine();
+    return;
+  }
+
+  const state = mcGetPenaltyState(session);
+
+  if (!state?.started || !state?.winner) {
+    removeScoreLine();
+    return;
+  }
+
+  const countGoals = shots => {
+    if (!Array.isArray(shots)) return 0;
+
+    return shots.filter(shot =>
+      shot === true ||
+      shot?.goal === true ||
+      shot?.scored === true ||
+      String(shot?.result ?? "").toLowerCase() === "goal" ||
+      String(shot?.outcome ?? "").toLowerCase() === "goal"
+    ).length;
+  };
+
+  const homePenalty = countGoals(state.home);
+  const awayPenalty = countGoals(state.away);
+
+  if (homePenalty === awayPenalty) {
+    removeScoreLine();
+    return;
+  }
+
+  if (!scoreLine) {
+    scoreLine = document.createElement("div");
+    scoreLine.className = "mc-penalty-result-score";
+    host.appendChild(scoreLine);
+  }
+
+  scoreLine.textContent = `(${homePenalty} – ${awayPenalty})`;
+
+  Object.assign(scoreLine.style, {
+    display: "block",
+    marginTop: "4px",
+    fontSize: "0.85em",
+    fontWeight: "600",
+    textAlign: "center"
+  });
+}
 
     /* -------------------- Render: History -------------------- */
 

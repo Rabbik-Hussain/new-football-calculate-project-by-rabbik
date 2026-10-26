@@ -2,6 +2,9 @@
    MATCHCRAFT - TEAMS & SQUADS
    Premium Dark Dashboard Design
 ========================================= */
+html{
+    scroll-behavior: smooth;
+}
 
 #teams {
     color: #e8edf8;

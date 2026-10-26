@@ -290,19 +290,17 @@ function getAllMatches() {
 
       const tournamentId = tournamentIdOfMatch(match);
 
-      const candidate = {
-        ...match,
-        __storageKey: key,
-        __isMatchCenterSession: key === STORAGE.sessions
-      };
-
-      // প্রথমে Fixture ID দিয়ে একই ম্যাচ শনাক্ত করো।
-      // Tournament ID অনুপস্থিত থাকলে নাম/ID থেকে resolve করা হবে।
       const identity = fixtureId
         ? `fixture:${fixtureId}`
         : matchId
           ? `match:${tournamentId}:${matchId}`
           : `record:${key}:${JSON.stringify(match)}`;
+
+      const candidate = {
+        ...match,
+        __storageKey: key,
+        __isMatchCenterSession: key === STORAGE.sessions
+      };
 
       const existing = matchesByIdentity.get(identity);
 
@@ -314,21 +312,90 @@ function getAllMatches() {
       const candidateCompleted = isCompleted(candidate);
       const existingCompleted = isCompleted(existing);
 
-      // সম্পন্ন ফলাফলকে অগ্রাধিকার।
-      if (candidateCompleted && !existingCompleted) {
-        matchesByIdentity.set(identity, candidate);
-        return;
+      // একই ম্যাচের Fixture ও Session-এর তথ্য একত্রে রাখো।
+      // Session-এর স্কোর এবং Fixture-এর পেনাল্টি তথ্য—দুটিই সংরক্ষিত থাকবে।
+      let merged;
+
+      if (candidate.__isMatchCenterSession) {
+        merged = {
+          ...candidate,
+          ...existing,
+          ...candidate
+        };
+      } else {
+        merged = {
+          ...candidate,
+          ...existing
+        };
       }
 
-      // দুটোই সম্পন্ন হলে Match Center Session-কে অগ্রাধিকার।
-      if (
-        candidateCompleted &&
-        existingCompleted &&
-        candidate.__isMatchCenterSession &&
-        !existing.__isMatchCenterSession
-      ) {
-        matchesByIdentity.set(identity, candidate);
-      }
+      // ফলাফল সম্পন্ন হলে সম্পন্ন রেকর্ডের মূল স্কোর অগ্রাধিকার পাবে।
+      const preferred =
+        candidateCompleted && !existingCompleted
+          ? candidate
+          : existingCompleted && !candidateCompleted
+            ? existing
+            : candidate.__isMatchCenterSession
+              ? candidate
+              : existing;
+
+      merged = {
+        ...merged,
+        homeScore: preferred.homeScore ?? merged.homeScore,
+        awayScore: preferred.awayScore ?? merged.awayScore
+      };
+
+      // Fixture-এ পেনাল্টির তথ্য থাকলে সেটি Session-এর ফাঁকা মান দিয়ে মুছবে না।
+      [
+    "penaltyShootout",
+    "hasPenaltyShootout",
+    "penaltyHomeScore",
+    "penaltyAwayScore",
+    "homePenaltyScore",
+    "awayPenaltyScore",
+    "penaltyScoreHome",
+    "penaltyScoreAway",
+    "penaltyWinner",
+    "penaltyWinnerTeamId",
+    "penaltyWinnerId"
+].forEach(field => {
+    const candidateValue = candidate[field];
+    const existingValue = existing[field];
+
+    const candidateHasValue =
+        candidateValue !== undefined &&
+        candidateValue !== null &&
+        candidateValue !== "";
+
+    const existingHasValue =
+        existingValue !== undefined &&
+        existingValue !== null &&
+        existingValue !== "";
+
+    // কোনো একটি রেকর্ডে পেনাল্টি সম্পন্ন থাকলে,
+    // অন্য রেকর্ডের false/null সেটি মুছে ফেলতে পারবে না।
+    if (
+        (field === "penaltyShootout" ||
+         field === "hasPenaltyShootout") &&
+        candidateValue === false &&
+        existingValue === true
+    ) {
+        merged[field] = true;
+        return;
+    }
+
+    if (candidateHasValue) {
+        merged[field] = candidateValue;
+    } else if (existingHasValue) {
+        merged[field] = existingValue;
+    }
+});
+
+      merged.__isMatchCenterSession =
+        candidate.__isMatchCenterSession ||
+        existing.__isMatchCenterSession;
+
+      matchesByIdentity.set(identity, merged);
     });
   });
 
@@ -780,27 +847,66 @@ function updateBracket(rounds, results) {
             : (fallback || "");
     }
 
-    function getPenaltyWinner(result) {
-        const winnerId =
-            result.penaltyWinnerTeamId ??
-            result.penaltyWinnerId;
+ function getPenaltyWinner(result) {
+  if (!result) return null;
 
-        if (winnerId != null && winnerId !== "") {
-            return String(winnerId);
-        }
+  const homeId = String(teamIdOfMatch(result, "home") ?? "");
+  const awayId = String(teamIdOfMatch(result, "away") ?? "");
 
-        const side = String(result.penaltyWinner ?? "").toLowerCase();
+  const winnerId =
+    result.penaltyWinnerTeamId ??
+    result.penaltyWinnerId;
 
-        if (side === "home") {
-            return idOf(result.homeId ?? result.homeTeamId);
-        }
+  // প্রথমে বিজয়ী দলের ID দিয়ে শনাক্ত করো।
+  if (winnerId != null && String(winnerId) !== "") {
+    if (String(winnerId) === homeId) return "home";
+    if (String(winnerId) === awayId) return "away";
+  }
 
-        if (side === "away") {
-            return idOf(result.awayId ?? result.awayTeamId);
-        }
+  // এরপর winner ফিল্ডের মান দিয়ে শনাক্ত করো।
+  const winner = String(result.penaltyWinner ?? "")
+    .trim()
+    .toLowerCase();
 
-        return null;
-    }
+  if (["home", "h", "home-team"].includes(winner)) {
+    return "home";
+  }
+
+  if (["away", "a", "away-team"].includes(winner)) {
+    return "away";
+  }
+
+  // সর্বশেষে পেনাল্টি স্কোর তুলনা করো।
+  const homeRaw =
+    result.penaltyHomeScore ??
+    result.homePenaltyScore ??
+    result.penaltyScoreHome;
+
+  const awayRaw =
+    result.penaltyAwayScore ??
+    result.awayPenaltyScore ??
+    result.penaltyScoreAway;
+
+  if (
+    homeRaw == null || homeRaw === "" ||
+    awayRaw == null || awayRaw === ""
+  ) {
+    return null;
+  }
+
+  const homePenalty = Number(homeRaw);
+  const awayPenalty = Number(awayRaw);
+
+  if (
+    !Number.isFinite(homePenalty) ||
+    !Number.isFinite(awayPenalty) ||
+    homePenalty === awayPenalty
+  ) {
+    return null;
+  }
+
+  return homePenalty > awayPenalty ? "home" : "away";
+}
 
     function findResult(match) {
         return allResults.find(result => {
@@ -935,26 +1041,39 @@ function updateBracket(rounds, results) {
                     : penaltyHome;
             }
 
-            if (match.homeScore > match.awayScore) {
-                match.winnerId = homeId;
-            } else if (match.awayScore > match.homeScore) {
-                match.winnerId = awayId;
-            } else {
-                const penaltyWinner = getPenaltyWinner(result);
+           if (match.homeScore > match.awayScore) {
+    match.winnerId = homeId;
+} else if (match.awayScore > match.homeScore) {
+    match.winnerId = awayId;
+} else {
+    // Regulation/extra-time score is tied.
+    // A completed penalty shootout can decide a knockout winner.
+    const penaltyWinner = getPenaltyWinner(result);
 
-                if (penaltyWinner === resultHomeId) {
-                    match.winnerId = sameOrder ? homeId : awayId;
-                } else if (penaltyWinner === resultAwayId) {
-                    match.winnerId = sameOrder ? awayId : homeId;
-                } else if (match.penaltyHomeScore !== null &&
-                           match.penaltyAwayScore !== null) {
-                    if (match.penaltyHomeScore > match.penaltyAwayScore) {
-                        match.winnerId = homeId;
-                    } else if (match.penaltyAwayScore > match.penaltyHomeScore) {
-                        match.winnerId = awayId;
-                    }
-                }
-            }
+    if (penaltyWinner === "home") {
+        match.winnerId = sameOrder ? homeId : awayId;
+    } else if (penaltyWinner === "away") {
+        match.winnerId = sameOrder ? awayId : homeId;
+    } else {
+        // Fallback: compare penalty scores in bracket order.
+        const penaltyHome = match.penaltyHomeScore;
+        const penaltyAway = match.penaltyAwayScore;
+
+        if (
+            penaltyHome !== null &&
+            penaltyAway !== null &&
+            penaltyHome > penaltyAway
+        ) {
+            match.winnerId = homeId;
+        } else if (
+            penaltyHome !== null &&
+            penaltyAway !== null &&
+            penaltyAway > penaltyHome
+        ) {
+            match.winnerId = awayId;
+        }
+    }
+}
 
             if (match.winnerId) {
                 match.winnerName = match.winnerId === homeId
@@ -1061,19 +1180,29 @@ function syncBracketFixtures(tournament, state) {
         changed = true;
       }
 
-      // দল পরিবর্তিত হলে আগের ফলাফল বাতিল করো
-      if (teamsChanged) {
-        fixture.homeScore = null;
-        fixture.awayScore = null;
-        fixture.score = "";
-        fixture.status = "scheduled";
-        fixture.matchStatus = "Scheduled";
-        fixture.resultSaved = false;
-        fixture.resultSource = "";
-        fixture.resultSessionId = "";
-        fixture.completedAt = null;
-        changed = true;
-      }
+      // দল পরিবর্তিত হলে আগের ফলাফল ও পেনাল্টি রিসেট করো
+if (teamsChanged) {
+  fixture.homeScore = null;
+  fixture.awayScore = null;
+  fixture.score = "";
+
+  fixture.status = "scheduled";
+  fixture.matchStatus = "Scheduled";
+  fixture.resultSaved = false;
+
+  fixture.resultSource = "";
+  fixture.resultSessionId = "";
+  fixture.completedAt = null;
+
+  // আগের পেনাল্টির ফলাফল মুছে ফেলো
+  fixture.penaltyShootout = false;
+  fixture.penaltyHomeScore = null;
+  fixture.penaltyAwayScore = null;
+  fixture.penaltyWinner = null;
+  fixture.penaltyWinnerTeamId = null;
+
+  changed = true;
+}
 
       const values = {
         id: fixtureId,
@@ -1102,6 +1231,53 @@ function syncBracketFixtures(tournament, state) {
           changed = true;
         }
       });
+
+      // Bracket-এ সংরক্ষিত ম্যাচের ফলাফল Fixture-এ সিঙ্ক করো।
+if (
+  match.homeScore != null &&
+  match.awayScore != null
+) {
+  const resultValues = {
+    homeScore: Number(match.homeScore),
+    awayScore: Number(match.awayScore),
+    score: `${match.homeScore}-${match.awayScore}`,
+    status: "completed",
+    matchStatus: "Full-Time",
+    resultSaved: true
+  };
+
+  Object.entries(resultValues).forEach(([key, value]) => {
+    if (fixture[key] !== value) {
+      fixture[key] = value;
+      changed = true;
+    }
+  });
+
+  // পেনাল্টি স্কোর থাকলে সেটিও সিঙ্ক করো।
+  if (
+    match.penaltyHomeScore != null &&
+    match.penaltyAwayScore != null
+  ) {
+    const penaltyValues = {
+      penaltyShootout: true,
+      penaltyHomeScore: Number(match.penaltyHomeScore),
+      penaltyAwayScore: Number(match.penaltyAwayScore),
+      penaltyWinner: Number(match.penaltyHomeScore) >
+        Number(match.penaltyAwayScore) ? "home" : "away",
+      penaltyWinnerTeamId: Number(match.penaltyHomeScore) >
+        Number(match.penaltyAwayScore)
+          ? String(match.homeId)
+          : String(match.awayId)
+    };
+
+    Object.entries(penaltyValues).forEach(([key, value]) => {
+      if (fixture[key] !== value) {
+        fixture[key] = value;
+        changed = true;
+      }
+    });
+  }
+}
 
       if (
         !sameId(match.fixtureId, fixtureId) ||
@@ -1342,8 +1518,12 @@ function saveBracketScore(roundId, matchId) {
   }
 
   function hasKnockout(type) {
-    return type.includes("knockout") || type.includes("mixed");
-  }
+  return (
+    type.includes("knockout") ||
+    type.includes("mixed") ||
+    type.includes("group")
+  );
+}
 
   function renderShell() {
     root.innerHTML = `
@@ -1690,9 +1870,19 @@ function renderBracket(tournament, teams, results, state) {
                 const homeLogo = teamLogoById(match.homeId);
                 const awayLogo = teamLogoById(match.awayId);
 
-                const hasPenaltyScore =
-                  match.penaltyHomeScore != null &&
-                  match.penaltyAwayScore != null;
+               const hasPenaltyScore =
+  match.penaltyHomeScore != null &&
+  match.penaltyAwayScore != null &&
+  match.homeScore != null &&
+  match.awayScore != null &&
+  Number(match.homeScore) === Number(match.awayScore) &&
+  Number(match.penaltyHomeScore) !== Number(match.penaltyAwayScore);
+
+const penaltyScoreMarkup = hasPenaltyScore
+  ? `<small class="br-penalty-score">
+       (${text(match.penaltyHomeScore)}–${text(match.penaltyAwayScore)})
+     </small>`
+  : "";
 
                 return `
                   <article class="br-bracket-match">
@@ -1723,15 +1913,9 @@ function renderBracket(tournament, teams, results, state) {
                       </span>
 
                       <strong class="br-bracket-score">
-                        ${match.homeScore ?? "—"}
-                        ${
-                          hasPenaltyScore
-                            ? `<small class="br-penalty-score">
-                                (${match.penaltyHomeScore}–${match.penaltyAwayScore})
-                              </small>`
-                            : ""
-                        }
-                      </strong>
+  <span>${match.homeScore ?? "—"}</span>
+  ${penaltyScoreMarkup}
+</strong>
                     </div>
 
                     <div class="br-bracket-team ${
@@ -1760,8 +1944,9 @@ function renderBracket(tournament, teams, results, state) {
                       </span>
 
                       <strong class="br-bracket-score">
-                        ${match.awayScore ?? "—"}
-                      </strong>
+  <span>${match.awayScore ?? "—"}</span>
+  ${penaltyScoreMarkup}
+</strong>
                     </div>
 
                     <div class="br-bracket-status">
@@ -1898,10 +2083,16 @@ function renderBracket(tournament, teams, results, state) {
           const completedPairs = new Set();
 
           groupResults.forEach(match => {
-            const homeId = teamIdOfMatch(match, "home");
-            const awayId = teamIdOfMatch(match, "away");
-            const homeScore = scoreOf(match, "home");
-            const awayScore = scoreOf(match, "away");
+            const homeId = String(
+    teamIdOfMatch(match, "home") ?? ""
+);
+
+const awayId = String(
+    teamIdOfMatch(match, "away") ?? ""
+);
+
+const homeScore = scoreOf(match, "home");
+const awayScore = scoreOf(match, "away");
 
             if (
               homeScore === null ||
@@ -2069,10 +2260,22 @@ function renderBracket(tournament, teams, results, state) {
 
       const ids = group.teams.map(team => String(team.id));
 
-      const groupResults = results.filter(match =>
-        ids.includes(teamIdOfMatch(match, "home")) &&
-        ids.includes(teamIdOfMatch(match, "away"))
-      );
+      const groupResults = results.filter(match => {
+    const homeId = String(
+        teamIdOfMatch(match, "home") ?? ""
+    );
+
+    const awayId = String(
+        teamIdOfMatch(match, "away") ?? ""
+    );
+
+    return (
+        homeId !== "" &&
+        awayId !== "" &&
+        ids.includes(homeId) &&
+        ids.includes(awayId)
+    );
+});
 
       const expectedMatches =
         groupTeams.length * (groupTeams.length - 1) / 2;
