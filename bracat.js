@@ -234,6 +234,27 @@
     return null;
   }
 
+  function getMatchPairKey(match) {
+    if (!match || typeof match !== "object") return null;
+
+    const tournamentId = tournamentIdOfMatch(match);
+    const homeId = teamIdOfMatch(match, "home");
+    const awayId = teamIdOfMatch(match, "away");
+
+    if (
+        tournamentId == null ||
+        homeId == null ||
+        awayId == null ||
+        sameId(homeId, awayId)
+    ) {
+        return null;
+    }
+
+    const teams = [String(homeId), String(awayId)].sort();
+
+    return `${String(tournamentId)}::${teams[0]}::${teams[1]}`;
+}
+
 function getAllMatches() {
   const matchesByIdentity = new Map();
 
@@ -476,111 +497,147 @@ function getAllMatches() {
 }
 
   function roundName(teamCount) {
-    if (teamCount === 2) return "Final";
-    if (teamCount === 4) return "Semi-Final";
-    if (teamCount === 8) return "Quarter-Final";
-    if (teamCount === 16) return "Round of 16";
-    if (teamCount === 32) return "Round of 32";
+    const count = Number(teamCount);
 
-    return `Round of ${teamCount}`;
-  }
+    if (count <= 2) return "Final";
+    if (count <= 4) return "Semi-Final";
+    if (count <= 8) return "Quarter-Final";
+    if (count <= 16) return "Round of 16";
+    if (count <= 32) return "Round of 32";
+    if (count <= 64) return "Round of 64";
 
-  function buildBracket(qualifiedTeams) {
-  const teams = [...qualifiedTeams];
+    return `Round of ${count}`;
+}
 
-  if (teams.length < 2) return [];
+ function buildBracket(qualifiedTeams) {
+    const teams = Array.isArray(qualifiedTeams)
+        ? qualifiedTeams
+            .filter(team => team && team.id != null)
+            .map(team => ({
+                id: team.id,
+                name: String(team.name ?? team.teamName ?? "Unknown Team")
+            }))
+        : [];
 
-  const size = Math.pow(
-    2,
-    Math.ceil(Math.log2(teams.length))
-  );
+    if (teams.length < 2) return [];
 
-  const byeCount = size - teams.length;
-  const firstRoundMatches = [];
-  let teamIndex = 0;
+    // একই দল একাধিকবার এলে বাদ দাও।
+    const uniqueTeams = [];
+    const seenTeamIds = new Set();
 
-  function makeMatch(roundNumber, matchNumber, home, away) {
-    return {
-      id: `r${roundNumber}-m${matchNumber}`,
-      homeId: home?.id ?? null,
-      homeName: home?.name ?? null,
-      awayId: away?.id ?? null,
-      awayName: away?.name ?? null,
+    teams.forEach(team => {
+        const id = String(team.id);
 
-      // Bracket-এর নিজস্ব স্কোর
-      manualHomeScore: null,
-      manualAwayScore: null,
-      manualCompleted: false,
+        if (seenTeamIds.has(id)) return;
 
-      // Match Center-এর সঙ্গে সংযোগ থাকলে ব্যবহৃত হবে
-      fixtureId: null,
-      matchId: null,
-
-      homeScore: null,
-      awayScore: null,
-      winnerId: null,
-      winnerName: null
-    };
-  }
-
-  for (let i = 0; i < byeCount; i++) {
-    firstRoundMatches.push(
-      makeMatch(
-        1,
-        firstRoundMatches.length + 1,
-        teams[teamIndex++],
-        null
-      )
-    );
-  }
-
-  while (teamIndex < teams.length) {
-    const home = teams[teamIndex++];
-    const away = teams[teamIndex++];
-
-    firstRoundMatches.push(
-      makeMatch(
-        1,
-        firstRoundMatches.length + 1,
-        home,
-        away
-      )
-    );
-  }
-
-  const rounds = [{
-    id: "round-1",
-    name: roundName(size),
-    matches: firstRoundMatches
-  }];
-
-  let previousMatchCount = firstRoundMatches.length;
-  let roundNumber = 2;
-
-  while (previousMatchCount > 1) {
-    const nextMatchCount = Math.ceil(previousMatchCount / 2);
-
-    const matches = Array.from(
-      { length: nextMatchCount },
-      (_, index) => makeMatch(
-        roundNumber,
-        index + 1,
-        null,
-        null
-      )
-    );
-
-    rounds.push({
-      id: `round-${roundNumber}`,
-      name: roundName(previousMatchCount),
-      matches
+        seenTeamIds.add(id);
+        uniqueTeams.push(team);
     });
 
-    previousMatchCount = nextMatchCount;
-    roundNumber++;
-  }
+    if (uniqueTeams.length < 2) return [];
 
-  return rounds;
+    const teamCount = uniqueTeams.length;
+
+    // পরবর্তী 2-এর ঘাতের সংখ্যা নির্ধারণ।
+    const bracketSize = Math.pow(
+        2,
+        Math.ceil(Math.log2(teamCount))
+    );
+
+    const firstRoundMatchCount = bracketSize / 2;
+    const byeCount = bracketSize - teamCount;
+    const actualFirstRoundMatches =
+        firstRoundMatchCount - byeCount;
+
+    function makeMatch(roundNumber, matchNumber, home, away) {
+        return {
+            id: `r${roundNumber}-m${matchNumber}`,
+
+            homeId: home?.id ?? null,
+            homeName: home?.name ?? null,
+
+            awayId: away?.id ?? null,
+            awayName: away?.name ?? null,
+
+            manualHomeScore: null,
+            manualAwayScore: null,
+            manualCompleted: false,
+
+            fixtureId: null,
+            matchId: null,
+
+            homeScore: null,
+            awayScore: null,
+
+            winnerId: null,
+            winnerName: null
+        };
+    }
+
+    // প্রথম রাউন্ডে Bye-প্রাপ্ত দলগুলোকে স্বয়ংক্রিয়ভাবে এগিয়ে দাও।
+    const firstRoundMatches = [];
+    let teamIndex = 0;
+
+    for (let i = 0; i < byeCount; i++) {
+        firstRoundMatches.push(
+            makeMatch(
+                1,
+                firstRoundMatches.length + 1,
+                uniqueTeams[teamIndex++],
+                null
+            )
+        );
+    }
+
+    // বাকি দলগুলো প্রথম রাউন্ডে মুখোমুখি হবে।
+    for (let i = 0; i < actualFirstRoundMatches; i++) {
+        const home = uniqueTeams[teamIndex++];
+        const away = uniqueTeams[teamIndex++];
+
+        firstRoundMatches.push(
+            makeMatch(
+                1,
+                firstRoundMatches.length + 1,
+                home,
+                away
+            )
+        );
+    }
+
+    const rounds = [{
+        id: "round-1",
+        name: roundName(bracketSize),
+        matches: firstRoundMatches
+    }];
+
+    // পরবর্তী রাউন্ড তৈরি: প্রতিটি দুই ম্যাচের বিজয়ী
+    // পরের রাউন্ডের একটি ম্যাচে যাবে।
+    let previousMatchCount = firstRoundMatches.length;
+    let roundNumber = 2;
+
+    while (previousMatchCount > 1) {
+        const nextMatchCount = Math.ceil(previousMatchCount / 2);
+
+        const matches = Array.from(
+            { length: nextMatchCount },
+            (_, index) =>
+                makeMatch(roundNumber, index + 1, null, null)
+        );
+
+        // পরের রাউন্ডের নাম নির্ধারণ।
+        const remainingTeams = nextMatchCount * 2;
+
+        rounds.push({
+            id: `round-${roundNumber}`,
+            name: roundName(remainingTeams),
+            matches
+        });
+
+        previousMatchCount = nextMatchCount;
+        roundNumber++;
+    }
+
+    return rounds;
 }
 
 function findBracketResult(bracketMatch, results) {
@@ -701,15 +758,15 @@ function updateBracket(rounds, results) {
     const allResults = Array.isArray(results) ? results : [];
 
     function idOf(value) {
-        return value == null || value === "" ? null : String(value);
+        return value == null || value === ""
+            ? null
+            : String(value);
     }
 
     function getTeamName(teamId, fallback = "") {
         if (teamId == null) return fallback || "";
 
         const id = String(teamId);
-
-        // Use the team's name from the existing team library.
         const teams = typeof getTeams === "function" ? getTeams() : [];
 
         const team = Array.isArray(teams)
@@ -719,25 +776,20 @@ function updateBracket(rounds, results) {
             : null;
 
         return team
-            ? (
-                team.name ??
-                team.teamName ??
-                team.title ??
-                fallback ??
-                ""
-            )
+            ? (team.name ?? team.teamName ?? team.title ?? fallback ?? "")
             : (fallback || "");
     }
 
     function getPenaltyWinner(result) {
-        if (!result) return null;
+        const winnerId =
+            result.penaltyWinnerTeamId ??
+            result.penaltyWinnerId;
 
-        if (result.penaltyWinnerTeamId != null &&
-            result.penaltyWinnerTeamId !== "") {
-            return String(result.penaltyWinnerTeamId);
+        if (winnerId != null && winnerId !== "") {
+            return String(winnerId);
         }
 
-        const side = result.penaltyWinner;
+        const side = String(result.penaltyWinner ?? "").toLowerCase();
 
         if (side === "home") {
             return idOf(result.homeId ?? result.homeTeamId);
@@ -755,23 +807,39 @@ function updateBracket(rounds, results) {
             if (!result) return false;
 
             return (
-                (
-                    match.fixtureId != null &&
+                (match.fixtureId != null &&
                     result.fixtureId != null &&
-                    String(match.fixtureId) === String(result.fixtureId)
-                ) ||
-                (
-                    match.matchId != null &&
+                    String(match.fixtureId) === String(result.fixtureId)) ||
+                (match.matchId != null &&
                     result.matchId != null &&
-                    String(match.matchId) === String(result.matchId)
-                ) ||
-                (
-                    match.id != null &&
+                    String(match.matchId) === String(result.matchId)) ||
+                (match.id != null &&
                     result.bracketMatchId != null &&
-                    String(match.id) === String(result.bracketMatchId)
-                )
+                    String(match.id) === String(result.bracketMatchId))
             );
         }) || null;
+    }
+
+    function isCompleted(result) {
+        const status = String(
+            result.status ?? result.matchStatus ?? ""
+        ).toLowerCase().replace(/[\s_-]/g, "");
+
+        return (
+            ["completed", "fulltime", "finished", "ft"].includes(status) ||
+            result.completed === true ||
+            result.resultSaved === true
+        );
+    }
+
+    function validScore(value) {
+        if (value == null || value === "") return null;
+
+        const score = Number(value);
+
+        return Number.isFinite(score) && score >= 0
+            ? score
+            : null;
     }
 
     rounds.forEach(round => {
@@ -786,38 +854,23 @@ function updateBracket(rounds, results) {
             const homeId = idOf(match.homeId);
             const awayId = idOf(match.awayId);
 
-            // A bye advances automatically.
+            // Bye: automatically advance the available team.
             if (homeId && !awayId) {
                 match.winnerId = homeId;
-                match.winnerName = getTeamName(
-                    homeId,
-                    match.homeName
-                );
+                match.winnerName = getTeamName(homeId, match.homeName);
                 return;
             }
 
             if (awayId && !homeId) {
                 match.winnerId = awayId;
-                match.winnerName = getTeamName(
-                    awayId,
-                    match.awayName
-                );
+                match.winnerName = getTeamName(awayId, match.awayName);
                 return;
             }
 
             if (!homeId || !awayId) return;
 
             const result = findResult(match);
-            if (!result) return;
-
-            const completed =
-                result.status === "completed" ||
-                result.status === "full-time" ||
-                result.status === "Full-Time" ||
-                result.completed === true ||
-                result.resultSaved === true;
-
-            if (!completed) return;
+            if (!result || !isCompleted(result)) return;
 
             const resultHomeId = idOf(
                 result.homeId ?? result.homeTeamId
@@ -827,45 +880,59 @@ function updateBracket(rounds, results) {
             );
 
             const sameOrder =
-                resultHomeId === homeId &&
-                resultAwayId === awayId;
+                resultHomeId === homeId && resultAwayId === awayId;
 
             const reverseOrder =
-                resultHomeId === awayId &&
-                resultAwayId === homeId;
+                resultHomeId === awayId && resultAwayId === homeId;
 
             if (!sameOrder && !reverseOrder) return;
 
-            const rawHomeScore = Number(result.homeScore);
-            const rawAwayScore = Number(result.awayScore);
+            const rawHomeScore = validScore(
+                result.homeScore ?? result.scoreHome
+            );
+            const rawAwayScore = validScore(
+                result.awayScore ?? result.scoreAway
+            );
+
+            if (rawHomeScore === null || rawAwayScore === null) return;
+
+            match.homeScore = sameOrder ? rawHomeScore : rawAwayScore;
+            match.awayScore = sameOrder ? rawAwayScore : rawHomeScore;
+
+            // Read penalty scores when a shootout was recorded.
+            const penaltyHome = validScore(
+                result.penaltyHomeScore ??
+                result.homePenaltyScore ??
+                result.penaltyScoreHome
+            );
+
+            const penaltyAway = validScore(
+                result.penaltyAwayScore ??
+                result.awayPenaltyScore ??
+                result.penaltyScoreAway
+            );
+
+            const shootoutFlag = [
+                result.penaltyShootout,
+                result.hasPenaltyShootout,
+                result.penaltyShootoutEnabled
+            ].some(value =>
+                value === true ||
+                String(value).toLowerCase() === "true"
+            );
 
             if (
-                !Number.isFinite(rawHomeScore) ||
-                !Number.isFinite(rawAwayScore)
-            ) {
-                return;
-            }
-
-            match.homeScore = sameOrder
-                ? rawHomeScore
-                : rawAwayScore;
-
-            match.awayScore = sameOrder
-                ? rawAwayScore
-                : rawHomeScore;
-
-            if (
-                result.penaltyShootout === true &&
-                result.penaltyHomeScore != null &&
-                result.penaltyAwayScore != null
+                penaltyHome !== null &&
+                penaltyAway !== null &&
+                (shootoutFlag || penaltyHome !== penaltyAway)
             ) {
                 match.penaltyHomeScore = sameOrder
-                    ? Number(result.penaltyHomeScore)
-                    : Number(result.penaltyAwayScore);
+                    ? penaltyHome
+                    : penaltyAway;
 
                 match.penaltyAwayScore = sameOrder
-                    ? Number(result.penaltyAwayScore)
-                    : Number(result.penaltyHomeScore);
+                    ? penaltyAway
+                    : penaltyHome;
             }
 
             if (match.homeScore > match.awayScore) {
@@ -879,6 +946,13 @@ function updateBracket(rounds, results) {
                     match.winnerId = sameOrder ? homeId : awayId;
                 } else if (penaltyWinner === resultAwayId) {
                     match.winnerId = sameOrder ? awayId : homeId;
+                } else if (match.penaltyHomeScore !== null &&
+                           match.penaltyAwayScore !== null) {
+                    if (match.penaltyHomeScore > match.penaltyAwayScore) {
+                        match.winnerId = homeId;
+                    } else if (match.penaltyAwayScore > match.penaltyHomeScore) {
+                        match.winnerId = awayId;
+                    }
                 }
             }
 
@@ -890,12 +964,8 @@ function updateBracket(rounds, results) {
         });
     });
 
-    // Advance winners and their names to the next round.
-    for (
-        let roundIndex = 0;
-        roundIndex < rounds.length - 1;
-        roundIndex++
-    ) {
+    // Advance winners into the next round.
+    for (let roundIndex = 0; roundIndex < rounds.length - 1; roundIndex++) {
         const currentMatches = rounds[roundIndex].matches || [];
         const nextMatches = rounds[roundIndex + 1].matches || [];
 
@@ -903,23 +973,15 @@ function updateBracket(rounds, results) {
             const nextMatch = nextMatches[Math.floor(index / 2)];
             if (!nextMatch) return;
 
-            const isHomeSlot = index % 2 === 0;
-
-            if (isHomeSlot) {
+            if (index % 2 === 0) {
                 nextMatch.homeId = match.winnerId || null;
                 nextMatch.homeName = match.winnerId
-                    ? (
-                        match.winnerName ||
-                        getTeamName(match.winnerId)
-                    )
+                    ? (match.winnerName || getTeamName(match.winnerId))
                     : "";
             } else {
                 nextMatch.awayId = match.winnerId || null;
                 nextMatch.awayName = match.winnerId
-                    ? (
-                        match.winnerName ||
-                        getTeamName(match.winnerId)
-                    )
+                    ? (match.winnerName || getTeamName(match.winnerId))
                     : "";
             }
         });
@@ -932,20 +994,40 @@ function updateBracket(rounds, results) {
 function syncBracketFixtures(tournament, state) {
   if (!tournament || !state?.bracket?.length) return false;
 
-  const tournamentId = idOf(tournament);
+  const tournamentId = String(idOf(tournament));
   const fixtures = asArray(read(STORAGE.fixtures));
   let changed = false;
 
   state.bracket.forEach(round => {
-    round.matches.forEach(match => {
-      // দুই দল নির্ধারিত না হলে Fixture তৈরি করবে না
+    asArray(round.matches).forEach(match => {
+      // দুই দল নির্ধারিত না হলে Fixture তৈরি হবে না
       if (!match.homeId || !match.awayId) return;
+      if (sameId(match.homeId, match.awayId)) return;
 
-      const fixtureId = `mc-bracket-${tournamentId}-${match.id}`;
+      const fixtureId =
+        `mc-bracket-${tournamentId}-${match.id}`;
 
+      // নির্দিষ্ট Bracket Match ID দিয়ে আগে খোঁজা হবে
       let fixture = fixtures.find(item =>
-        String(item.id ?? item.fixtureId ?? "") === fixtureId
+        String(
+          item.fixtureId ??
+          item.id ??
+          item.matchId ??
+          ""
+        ) === fixtureId
       );
+
+      // একই Bracket Match-এর অন্য রেকর্ড থাকলে সেটিও শনাক্ত করো
+      if (!fixture) {
+        fixture = fixtures.find(item =>
+          sameId(
+            item.tournamentId ??
+            tournamentIdOfMatch(item),
+            tournamentId
+          ) &&
+          sameId(item.bracketMatchId, match.id)
+        );
+      }
 
       const teamsChanged = fixture && (
         !sameId(
@@ -979,7 +1061,7 @@ function syncBracketFixtures(tournament, state) {
         changed = true;
       }
 
-      // দল পরিবর্তিত হলে পুরোনো ফলাফল আর ব্যবহার করা হবে না
+      // দল পরিবর্তিত হলে আগের ফলাফল বাতিল করো
       if (teamsChanged) {
         fixture.homeScore = null;
         fixture.awayScore = null;
@@ -990,7 +1072,6 @@ function syncBracketFixtures(tournament, state) {
         fixture.resultSource = "";
         fixture.resultSessionId = "";
         fixture.completedAt = null;
-
         changed = true;
       }
 
@@ -1001,10 +1082,10 @@ function syncBracketFixtures(tournament, state) {
         tournamentId,
         tournamentName: tournamentName(tournament),
 
-        homeTeamId: match.homeId,
-        awayTeamId: match.awayId,
-        homeId: match.homeId,
-        awayId: match.awayId,
+        homeTeamId: String(match.homeId),
+        awayTeamId: String(match.awayId),
+        homeId: String(match.homeId),
+        awayId: String(match.awayId),
 
         homeTeamName: match.homeName,
         awayTeamName: match.awayName,
@@ -1037,6 +1118,130 @@ function syncBracketFixtures(tournament, state) {
     write(STORAGE.fixtures, fixtures);
     write(STORAGE.fixturesAlt, fixtures);
     write(STORAGE.scheduled, fixtures);
+
+    window.dispatchEvent(
+      new CustomEvent("matchcraft:fixtures-updated", {
+        detail: { tournamentId }
+      })
+    );
+  }
+
+  return changed;
+}
+
+function syncGroupFixtures(tournament, state) {
+  if (
+    !tournament ||
+    !state?.drawCreated ||
+    !Array.isArray(state.groups) ||
+    !state.groups.length
+  ) {
+    return false;
+  }
+
+  const type = tournamentType(tournament);
+
+  if (!hasGroups(type)) return false;
+
+  const tournamentId = idOf(tournament);
+  const fixtures = asArray(read(STORAGE.fixtures));
+  const allMatches = getAllMatches();
+
+  // অন্য Storage-এ থাকা ম্যাচসহ সব বিদ্যমান জুটি শনাক্ত করো।
+  const existingPairKeys = new Set(
+    allMatches
+      .filter(match => isForTournament(match, tournament))
+      .map(getMatchPairKey)
+      .filter(Boolean)
+  );
+
+  let changed = false;
+
+  state.groups.forEach((group, groupIndex) => {
+    const teams = asArray(group.teams);
+
+    // প্রতিটি গ্রুপের প্রতিটি দলের বিপক্ষে একটি করে ম্যাচ।
+    for (let i = 0; i < teams.length; i++) {
+      for (let j = i + 1; j < teams.length; j++) {
+        const home = teams[i];
+        const away = teams[j];
+
+        if (
+          !home?.id ||
+          !away?.id ||
+          sameId(home.id, away.id)
+        ) {
+          continue;
+        }
+
+        const fixtureId =
+          `mc-group-${tournamentId}-${group.id}-${home.id}-${away.id}`;
+
+        const newFixture = {
+          id: fixtureId,
+          fixtureId,
+          matchId: fixtureId,
+          tournamentId,
+          tournamentName: tournamentName(tournament),
+
+          homeTeamId: String(home.id),
+          awayTeamId: String(away.id),
+          homeId: String(home.id),
+          awayId: String(away.id),
+
+          homeTeamName: home.name,
+          awayTeamName: away.name,
+          homeName: home.name,
+          awayName: away.name,
+
+          groupId: group.id,
+          groupName: group.name,
+          stage: "group",
+          matchStage: "Group Stage",
+          round: "Group Stage",
+          roundName: "Group Stage",
+
+          matchday: Math.floor(
+            (i * (2 * teams.length - i - 1) / 2) + j - i
+          ),
+          groupIndex: groupIndex + 1,
+
+          date: "",
+          time: "",
+          venue: "",
+          status: "scheduled",
+          matchStatus: "Scheduled",
+          homeScore: null,
+          awayScore: null,
+          resultSaved: false
+        };
+
+        const pairKey = getMatchPairKey(newFixture);
+
+        if (!pairKey) continue;
+
+        // একই দলের জুটি আগে থেকেই থাকলে নতুন ম্যাচ তৈরি করবে না।
+        if (existingPairKeys.has(pairKey)) continue;
+
+        // একই রানেও যেন একই জুটি দ্বিতীয়বার তৈরি না হয়।
+        existingPairKeys.add(pairKey);
+
+        fixtures.push(newFixture);
+        changed = true;
+      }
+    }
+  });
+
+  if (changed) {
+    write(STORAGE.fixtures, fixtures);
+    write(STORAGE.fixturesAlt, fixtures);
+    write(STORAGE.scheduled, fixtures);
+
+    window.dispatchEvent(
+      new CustomEvent("matchcraft:fixtures-updated", {
+        detail: { tournamentId }
+      })
+    );
   }
 
   return changed;
@@ -1485,6 +1690,10 @@ function renderBracket(tournament, teams, results, state) {
                 const homeLogo = teamLogoById(match.homeId);
                 const awayLogo = teamLogoById(match.awayId);
 
+                const hasPenaltyScore =
+                  match.penaltyHomeScore != null &&
+                  match.penaltyAwayScore != null;
+
                 return `
                   <article class="br-bracket-match">
 
@@ -1513,17 +1722,16 @@ function renderBracket(tournament, teams, results, state) {
                         </span>
                       </span>
 
-                      <strong>
-  ${match.homeScore ?? "—"}
-  ${
-    match.penaltyHomeScore != null &&
-    match.penaltyAwayScore != null
-      ? `<small class="br-penalty-score">
-           (P ${match.penaltyHomeScore})
-         </small>`
-      : ""
-  }
-</strong>
+                      <strong class="br-bracket-score">
+                        ${match.homeScore ?? "—"}
+                        ${
+                          hasPenaltyScore
+                            ? `<small class="br-penalty-score">
+                                (${match.penaltyHomeScore}–${match.penaltyAwayScore})
+                              </small>`
+                            : ""
+                        }
+                      </strong>
                     </div>
 
                     <div class="br-bracket-team ${
@@ -1551,18 +1759,9 @@ function renderBracket(tournament, teams, results, state) {
                         </span>
                       </span>
 
-                      <strong>
-  ${match.awayScore ?? "—"}
-  ${
-    match.penaltyHomeScore != null &&
-    match.penaltyAwayScore != null
-      ? `<small class="br-penalty-score">
-           (P ${match.penaltyAwayScore})
-         </small>`
-      : ""
-  }
-</strong>
-
+                      <strong class="br-bracket-score">
+                        ${match.awayScore ?? "—"}
+                      </strong>
                     </div>
 
                     <div class="br-bracket-status">
@@ -1618,7 +1817,7 @@ function renderBracket(tournament, teams, results, state) {
   }
 }
 
-  function renderPage() {
+ function renderPage() {
     ensureTournamentOptions();
 
     const tournament = selectedTournament();
@@ -1655,49 +1854,137 @@ function renderBracket(tournament, teams, results, state) {
     $("#brDrawGroups", root).hidden = !hasGroups(type);
     $("#brCreateBracket", root).hidden = !hasKnockout(type);
 
-    // Automatically create the first bracket for pure Knockout.
+    // Automatically create a bracket only when appropriate.
     // Never overwrite an existing bracket automatically.
     if (
       hasKnockout(type) &&
-      !hasGroups(type) &&
       !state.bracket?.length &&
       teams.length >= 2
     ) {
-      state.bracket = buildBracket(
-        teams.map(team => ({
+      let entrants = [];
+
+      if (!hasGroups(type)) {
+        // Pure Knockout: all tournament teams enter.
+        entrants = teams.map(team => ({
           id: idOf(team),
           name: nameOf(team)
-        }))
-      );
+        }));
+      } else if (state.drawCreated && state.groups?.length) {
+        const allTeams = getTeams();
+        let allGroupsComplete = true;
+        const groupEntrants = [];
 
-      state.championId = null;
-      state.championName = null;
+        for (const group of state.groups) {
+          const groupTeams = (group.teams || []).map(savedTeam =>
+            findTeamById(allTeams, savedTeam.id) || {
+              id: savedTeam.id,
+              name: savedTeam.name
+            }
+          );
 
-      allState[idOf(tournament)] = state;
-      saveState(allState);
+          const ids = (group.teams || []).map(
+            team => String(team.id)
+          );
+
+          const groupResults = results.filter(match =>
+            ids.includes(teamIdOfMatch(match, "home")) &&
+            ids.includes(teamIdOfMatch(match, "away"))
+          );
+
+          const expectedMatches =
+            groupTeams.length * (groupTeams.length - 1) / 2;
+
+          // Check that every expected group match has a saved result.
+          const completedPairs = new Set();
+
+          groupResults.forEach(match => {
+            const homeId = teamIdOfMatch(match, "home");
+            const awayId = teamIdOfMatch(match, "away");
+            const homeScore = scoreOf(match, "home");
+            const awayScore = scoreOf(match, "away");
+
+            if (
+              homeScore === null ||
+              awayScore === null ||
+              homeId === "" ||
+              awayId === ""
+            ) {
+              return;
+            }
+
+            completedPairs.add(
+              [homeId, awayId].sort().join("::")
+            );
+          });
+
+          if (
+            expectedMatches === 0 ||
+            completedPairs.size < expectedMatches
+          ) {
+            allGroupsComplete = false;
+            break;
+          }
+
+          const standings = calculateStandings(
+            groupTeams,
+            groupResults,
+            group.name
+          );
+
+          // Two-team group: winner qualifies.
+          // Larger groups: top two qualify.
+          const qualifiersCount = 2;
+
+          groupEntrants.push(
+            ...standings.slice(0, qualifiersCount).map(team => ({
+              id: team.id,
+              name: team.name
+            }))
+          );
+        }
+
+        if (allGroupsComplete) {
+          entrants = groupEntrants;
+        }
+      }
+
+      if (entrants.length >= 2) {
+        state.bracket = buildBracket(entrants);
+        state.championId = null;
+        state.championName = null;
+
+        allState[idOf(tournament)] = state;
+        saveState(allState);
+      }
     }
 
     renderStats(tournament, teams, results, state);
-renderGroups(tournament, results, state);
-renderLeague(tournament, teams, results);
-renderBracket(tournament, teams, results, state);
+    renderGroups(tournament, results, state);
+    renderLeague(tournament, teams, results);
+    renderBracket(tournament, teams, results, state);
 
-// Bracket-এর আপডেট করা State সংরক্ষণ
-allState[idOf(tournament)] = state;
+    // Save the updated bracket state.
+    allState[idOf(tournament)] = state;
 
-// Bracket ম্যাচের সঙ্গে Fixture ID যুক্ত করা
-const fixturesChanged = syncBracketFixtures(tournament, state);
+    // Synchronize bracket matches with fixtures.
+    const groupFixturesChanged = syncGroupFixtures(tournament, state);
+    const bracketFixturesChanged = syncBracketFixtures(tournament, state);
+    const fixturesChanged =
+      groupFixturesChanged || bracketFixturesChanged;
 
-allState[idOf(tournament)] = state;
-saveState(allState);
+    allState[idOf(tournament)] = state;
+    saveState(allState);
 
-// একই পেজে Match Center-কে Fixture পরিবর্তনের খবর দেওয়া
-if (fixturesChanged) {
-  window.dispatchEvent(
-    new CustomEvent("matchcraft:fixtures-updated")
-  );
+    if (fixturesChanged) {
+      window.dispatchEvent(
+        new CustomEvent("matchcraft:fixtures-updated", {
+          detail: {
+            tournamentId: idOf(tournament)
+          }
+        })
+      );
+    }
 }
-  }
 
   function createGroupDraw() {
     const tournament = selectedTournament();
@@ -1749,79 +2036,101 @@ if (fixturesChanged) {
   }
 
   function createOrUpdateBracket() {
-    const tournament = selectedTournament();
+  const tournament = selectedTournament();
 
-    if (!tournament) {
-      alert("প্রথমে একটি টুর্নামেন্ট তৈরি করুন।");
+  if (!tournament) {
+    alert("প্রথমে একটি টুর্নামেন্ট তৈরি করুন।");
+    return;
+  }
+
+  const teams = getTournamentTeams(tournament);
+  const type = tournamentType(tournament);
+  const allState = getState();
+  const state = tournamentState(allState, idOf(tournament));
+  const results = getCompletedResults(tournament);
+
+  let entrants = [];
+
+  if (hasGroups(type)) {
+    if (!state.drawCreated || !state.groups?.length) {
+      alert("প্রথমে Random Group Draw তৈরি করুন।");
       return;
     }
 
-    const teams = getTournamentTeams(tournament);
-    const type = tournamentType(tournament);
-    const allState = getState();
-    const state = tournamentState(allState, idOf(tournament));
+    const allTeams = getTeams();
 
-    let entrants = [];
-
-    if (hasGroups(type)) {
-      if (!state.drawCreated || !state.groups?.length) {
-        alert("প্রথমে Random Group Draw তৈরি করুন।");
-        return;
-      }
-
-      const allTeams = getTeams();
-
-      entrants = state.groups.flatMap(group => {
-        const groupTeams = group.teams.map(savedTeam =>
-          findTeamById(allTeams, savedTeam.id) || {
-            id: savedTeam.id,
-            name: savedTeam.name
-          }
-        );
-
-        const ids = group.teams.map(team => String(team.id));
-        const results = getCompletedResults(tournament).filter(match =>
-          ids.includes(teamIdOfMatch(match, "home")) &&
-          ids.includes(teamIdOfMatch(match, "away"))
-        );
-
-        return calculateStandings(groupTeams, results).slice(0, 2);
-      });
-
-      if (entrants.length < 2) {
-        alert("Knockout bracket তৈরি করতে কমপক্ষে ২ জন qualifier দরকার।");
-        return;
-      }
-    } else {
-      entrants = teams.map(team => ({
-        id: idOf(team),
-        name: nameOf(team)
-      }));
-    }
-
-    if (entrants.length < 2) {
-      alert("Bracket তৈরি করতে কমপক্ষে ২টি দল থাকতে হবে।");
-      return;
-    }
-
-    if (state.bracket?.length) {
-      const confirmed = confirm(
-        "নতুন bracket তৈরি করলে এই টুর্নামেন্টের আগের bracket-এর কাঠামো বদলে যাবে। চালিয়ে যাবেন?"
+    for (const group of state.groups) {
+      const groupTeams = group.teams.map(savedTeam =>
+        findTeamById(allTeams, savedTeam.id) || {
+          id: savedTeam.id,
+          name: savedTeam.name
+        }
       );
 
-      if (!confirmed) return;
+      const ids = group.teams.map(team => String(team.id));
+
+      const groupResults = results.filter(match =>
+        ids.includes(teamIdOfMatch(match, "home")) &&
+        ids.includes(teamIdOfMatch(match, "away"))
+      );
+
+      const expectedMatches =
+        groupTeams.length * (groupTeams.length - 1) / 2;
+
+      if (groupResults.length < expectedMatches) {
+        alert(
+          `${group.name}-এর সব ম্যাচ শেষ হলে Bracket তৈরি করা যাবে।`
+        );
+        return;
+      }
+
+      const standings = calculateStandings(
+        groupTeams,
+        groupResults,
+        group.name
+      );
+
+      // প্রতি গ্রুপের সেরা দুই দল যোগ্য হবে।
+      entrants.push(
+        ...standings.slice(0, 2).map(team => ({
+          id: team.id,
+          name: team.name
+        }))
+      );
     }
-
-    state.bracket = buildBracket(entrants);
-    state.championId = null;
-    state.championName = null;
-
-    allState[idOf(tournament)] = state;
-    saveState(allState);
-
-    renderPage();
-    alert("Knockout bracket তৈরি হয়েছে। ম্যাচ Full-Time হলে বিজয়ী আপডেট হবে।");
+  } else {
+    entrants = teams.map(team => ({
+      id: idOf(team),
+      name: nameOf(team)
+    }));
   }
+
+  if (entrants.length < 2) {
+    alert("Bracket তৈরি করতে কমপক্ষে ২টি যোগ্য দল দরকার।");
+    return;
+  }
+
+  if (state.bracket?.length) {
+    const confirmed = confirm(
+      "আগের Bracket পরিবর্তন করে নতুন Bracket তৈরি করবেন?"
+    );
+
+    if (!confirmed) return;
+  }
+
+  state.bracket = buildBracket(entrants);
+  state.championId = null;
+  state.championName = null;
+
+  allState[idOf(tournament)] = state;
+  saveState(allState);
+
+  renderPage();
+
+  alert(
+    `Bracket তৈরি হয়েছে। মোট ${entrants.length}টি যোগ্য দল পরবর্তী রাউন্ডে খেলবে।`
+  );
+}
 
   function bindEvents() {
   $("#brTournamentSelect", root)?.addEventListener(
@@ -1903,6 +2212,15 @@ if (fixturesChanged) {
 
     window.addEventListener("matchcraft:match-updated", renderPage);
     window.addEventListener("matchcraft:fixtures-updated", renderPage);
+    window.addEventListener("matchcraft:tournaments-updated", () => {
+  ensureTournamentOptions();
+  renderPage();
+});
+
+window.addEventListener("matchcraft:teams-updated", () => {
+  ensureTournamentOptions();
+  renderPage();
+});
   }
 
   if (document.readyState === "loading") {

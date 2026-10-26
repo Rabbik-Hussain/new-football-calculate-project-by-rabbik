@@ -846,52 +846,171 @@ if (action === "details") {
                 return;
             }
 
-            /* Delete Tournament */
+           /* Delete Tournament */
 
-            if (action === "delete") {
-                const confirmed = confirm(
-                    "আপনি কি এই Tournament মুছে ফেলতে চান? এই কাজটি ফিরিয়ে আনা যাবে না।"
-                );
+if (action === "delete") {
+    const confirmed = confirm(
+        "আপনি কি এই Tournament এবং এর সংশ্লিষ্ট ডেটা মুছে ফেলতে চান? এই কাজটি ফিরিয়ে আনা যাবে না।"
+    );
 
-                if (!confirmed) {
-                    return;
-                }
+    if (!confirmed) {
+        return;
+    }
 
-                const updatedTournaments = tournaments.filter(
-                    function (item) {
-                        return (
-                            String(item.id) !== String(tournamentId)
-                        );
-                    }
-                );
+    const targetTournamentId = String(tournamentId);
 
-                if (!saveTournaments(updatedTournaments)) {
-                    return;
-                }
+    // Safely read a LocalStorage JSON value.
+    function readStoredArray(key) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw === null) return null;
 
-                if (
-                    editingTournamentId !== null &&
-                    String(editingTournamentId) ===
-                        String(tournamentId)
-                ) {
-                    resetTournamentForm();
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : null;
+        } catch (error) {
+            console.error("Tournament delete read error:", key, error);
+            return null;
+        }
+    }
 
-                    if (tournamentFormPanel) {
-                        tournamentFormPanel.hidden = true;
-                        tournamentFormPanel.style.setProperty(
-                            "display",
-                            "none",
-                            "important"
-                        );
-                    }
-                }
+    // Identify records that explicitly belong to this tournament.
+    function belongsToTournament(record) {
+        if (!record || typeof record !== "object") return false;
 
-                renderTournaments();
+        const possibleIds = [
+            record.tournamentId,
+            record.tournament,
+            record.tournament_id
+        ];
 
-                alert("Tournament সফলভাবে মুছে ফেলা হয়েছে।");
+        return possibleIds.some(function (value) {
+            if (value === undefined || value === null) return false;
+
+            if (typeof value === "object") {
+                value = value.id ?? value.tournamentId;
             }
+
+            return value !== undefined &&
+                value !== null &&
+                String(value) === targetTournamentId;
         });
     }
+
+    // Remove the tournament from the tournament list first.
+    const updatedTournaments = tournaments.filter(function (item) {
+        return String(item.id) !== targetTournamentId;
+    });
+
+    if (!saveTournaments(updatedTournaments)) {
+        return;
+    }
+
+    // Remove only records explicitly linked to this tournament.
+    const relatedArrayKeys = [
+        "matchcraft_teams",
+        "matchcraft_matches",
+        "matchcraft_fixtures",
+        "matchcraft_matches_fixtures",
+        "matchcraft_scheduled_matches"
+    ];
+
+    relatedArrayKeys.forEach(function (key) {
+        const records = readStoredArray(key);
+
+        // Do not overwrite data if its structure is unknown.
+        if (records === null) {
+            return;
+        }
+
+        const remainingRecords = records.filter(function (record) {
+            return !belongsToTournament(record);
+        });
+
+        try {
+            localStorage.setItem(key, JSON.stringify(remainingRecords));
+        } catch (error) {
+            console.error("Tournament delete save error:", key, error);
+        }
+    });
+
+    // Remove only this tournament's entry from bracket state.
+    const bracketStateKey = "matchcraft_bracat_state";
+
+    try {
+        const rawState = localStorage.getItem(bracketStateKey);
+
+        if (rawState !== null) {
+            const bracketState = JSON.parse(rawState);
+
+            if (
+                bracketState &&
+                typeof bracketState === "object" &&
+                !Array.isArray(bracketState)
+            ) {
+                delete bracketState[targetTournamentId];
+
+                localStorage.setItem(
+                    bracketStateKey,
+                    JSON.stringify(bracketState)
+                );
+            }
+        }
+    } catch (error) {
+        console.error("Bracket state cleanup error:", error);
+    }
+
+    // Close the edit form if the deleted tournament was being edited.
+    if (
+        editingTournamentId !== null &&
+        String(editingTournamentId) === targetTournamentId
+    ) {
+        resetTournamentForm();
+
+        if (tournamentFormPanel) {
+            tournamentFormPanel.hidden = true;
+            tournamentFormPanel.style.setProperty(
+                "display",
+                "none",
+                "important"
+            );
+        }
+    }
+
+    // Refresh the visible list and dashboard counts.
+    renderTournaments();
+    updateDashboardStats();
+
+    // Notify other MATCHCRAFT modules in this browser tab.
+    window.dispatchEvent(
+        new CustomEvent("matchcraft:tournaments-updated", {
+            detail: { tournamentId: targetTournamentId }
+        })
+    );
+
+    window.dispatchEvent(
+        new CustomEvent("matchcraft:teams-updated", {
+            detail: { tournamentId: targetTournamentId }
+        })
+    );
+
+    window.dispatchEvent(
+        new CustomEvent("matchcraft:fixtures-updated", {
+            detail: { tournamentId: targetTournamentId }
+        })
+    );
+
+    window.dispatchEvent(
+        new CustomEvent("matchcraft:match-updated", {
+            detail: { tournamentId: targetTournamentId }
+        })
+    );
+
+    alert("Tournament এবং শনাক্ত করা সংশ্লিষ্ট ডেটা মুছে ফেলা হয়েছে।");
+}
+
+        }); // tournamentList click event listener বন্ধ
+
+    } // if (tournamentList) ব্লক বন্ধ
 
 
     /* ---------- Save / Update Tournament ---------- */

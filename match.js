@@ -2434,17 +2434,27 @@ session.completedAt = session.finishedAt;
     );
 }
 
-    function startTicker() {
-        if (timerHandle) window.clearInterval(timerHandle);
-
-        timerHandle = window.setInterval(() => {
-            const session = getActiveSession();
-
-            if (session && !session.paused) {
-                updateLiveClock(session);
-            }
-        }, 1000);
+  function startTicker() {
+    if (timerHandle) {
+        window.clearInterval(timerHandle);
     }
+
+    // অপেক্ষা না করে সঙ্গে সঙ্গেই Live Clock আপডেট করো।
+    const session = getActiveSession();
+
+    if (session) {
+        updateLiveClock(session);
+    }
+
+    // এরপর প্রতি সেকেন্ডে আপডেট চালু রাখো।
+    timerHandle = window.setInterval(() => {
+        const activeSession = getActiveSession();
+
+        if (activeSession && !activeSession.paused) {
+            updateLiveClock(activeSession);
+        }
+    }, 1000);
+}
 
  function updateLiveClock(session) {
     const clock = $("#mcLiveClock");
