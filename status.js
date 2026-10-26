@@ -83,104 +83,215 @@
   }
 
   function readStorageGroup(group) {
-    const found = [];
-    const seen = new Set();
+  const found = [];
+  const seen = new Set();
+  const knownKeys = KEY_GROUPS[group] || [];
 
-    for (const key of KEY_GROUPS[group] || []) {
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      const list = normalizeArray(raw);
-      list.forEach(item => {
-        if (!item || typeof item !== "object") return;
-        const signature = idOf(item) || JSON.stringify(item).slice(0, 240);
-        if (!seen.has(signature)) {
-          seen.add(signature);
-          found.push(item);
-        }
-      });
-    }
+  function looksLikeMatch(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
 
-    // Discover likely keys without assuming a particular app schema.
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || KEY_GROUPS[group].includes(key)) continue;
-      const low = key.toLowerCase();
-      const likely = group === "tournaments" ? /tournament/ :
-        group === "teams" ? /team|squad/ :
-        group === "players" ? /player|squad/ :
-        /match|fixture|result|game/;
-      if (!likely.test(low)) continue;
-      const list = normalizeArray(localStorage.getItem(key));
-      list.forEach(item => {
-        if (!item || typeof item !== "object") return;
-        const signature = idOf(item) || JSON.stringify(item).slice(0, 240);
-        if (!seen.has(signature)) {
-          seen.add(signature);
-          found.push(item);
-        }
-      });
-    }
-    return found;
+    const hasTeams = Boolean(
+      item.homeTeamId || item.awayTeamId ||
+      item.homeTeamName || item.awayTeamName ||
+      item.teamAId || item.teamBId ||
+      item.team1Id || item.team2Id ||
+      item.homeTeam || item.awayTeam ||
+      item.teamA || item.teamB ||
+      item.team1 || item.team2
+    );
+
+    const hasMatchId = Boolean(
+      item.fixtureId || item.matchId ||
+      item.match_id || item.fixture_id
+    );
+
+    const hasScore = Boolean(
+      item.homeScore !== undefined ||
+      item.awayScore !== undefined ||
+      item.teamAScore !== undefined ||
+      item.teamBScore !== undefined ||
+      item.score !== undefined
+    );
+
+    const hasMatchState = Boolean(
+      item.status || item.matchStatus ||
+      item.resultSaved || item.events ||
+      item.startingXI
+    );
+
+    return (hasTeams && (hasMatchId || hasScore || hasMatchState)) ||
+      (hasMatchId && (hasScore || hasMatchState));
   }
 
-  function loadData() {
-    state.tournaments = readStorageGroup("tournaments");
-    state.teams = readStorageGroup("teams");
-    state.players = readStorageGroup("players");
+  function addItems(raw, sourceKey) {
+    normalizeArray(raw).forEach(item => {
+      if (!item || typeof item !== "object") return;
 
-    const records = readStorageGroup("matches");
-    const rawSessions = safeParse(localStorage.getItem("matchcraft_match_center_sessions"));
-    const sessions = Array.isArray(rawSessions) ? rawSessions : [];
-    const sessionIds = new Set(sessions.map(session => String(session?.id || "")).filter(Boolean));
-    const baseRecords = records.filter(record => !sessionIds.has(String(record?.id || "")));
+      if (group === "matches" && !looksLikeMatch(item)) return;
 
-    // Match Center sessions contain the authoritative event timeline. Merge each
-    // session into its fixture record so a fixture result and its events remain
-    // one match in Statistics instead of appearing as duplicate matches.
-    sessions.forEach(session => {
-      if (!session || typeof session !== "object") return;
-      const fixtureId = String(session.fixtureId || "");
-      const fixtureIndex = baseRecords.findIndex(record =>
-        String(record?.id || record?.fixtureId || record?.matchId || "") === fixtureId
+      const identity = group === "matches"
+        ? String(
+            item.fixtureId || item.fixture_id ||
+            item.matchId || item.match_id || item.id || ""
+          )
+        : idOf(item);
+
+      const signature = identity
+        ? `${sourceKey === "matchcraft_match_center_sessions" ? "session:" : ""}${identity}`
+        : JSON.stringify(item);
+
+      if (seen.has(signature)) return;
+
+      seen.add(signature);
+      found.push(item);
+    });
+  }
+
+  knownKeys.forEach(key => {
+    const raw = localStorage.getItem(key);
+    if (raw) addItems(raw, key);
+  });
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key || knownKeys.includes(key)) continue;
+
+    const low = key.toLowerCase();
+
+    const likely = group === "tournaments"
+      ? /tournament/
+      : group === "teams"
+        ? /team|squad/
+        : group === "players"
+          ? /player|squad/
+          : /match|fixture|result|game/;
+
+    if (!likely.test(low)) continue;
+
+    addItems(localStorage.getItem(key), key);
+  }
+
+  return found;
+}
+
+function loadData() {
+  state.tournaments = readStorageGroup("tournaments");
+  state.teams = readStorageGroup("teams");
+  state.players = readStorageGroup("players");
+
+  const records = readStorageGroup("matches");
+  const rawSessions = safeParse(
+    localStorage.getItem("matchcraft_match_center_sessions")
+  );
+  const sessions = Array.isArray(rawSessions) ? rawSessions : [];
+
+  const mergedByFixture = new Map();
+  const withoutFixtureId = [];
+
+  function fixtureKey(record) {
+    return String(
+      record?.fixtureId ||
+      record?.fixture_id ||
+      record?.matchId ||
+      record?.match_id ||
+      record?.id ||
+      ""
+    );
+  }
+
+  function mergeRecord(previous, incoming) {
+    const previousCompleted = isCompleted(previous);
+    const incomingCompleted = isCompleted(incoming);
+
+    const result = {
+      ...previous,
+      ...incoming
+    };
+
+    // Keep a saved completed result if the incoming record is stale.
+    if (previousCompleted && !incomingCompleted) {
+      Object.assign(result, previous);
+
+      // Still preserve event data from the incoming record if available.
+      if (Array.isArray(incoming.events) && incoming.events.length) {
+        result.events = incoming.events;
+      }
+      if (Array.isArray(incoming.substitutions) && incoming.substitutions.length) {
+        result.substitutions = incoming.substitutions;
+      }
+    }
+
+    // A Match Center session is the preferred source for match events.
+    if (Array.isArray(incoming.events) && incoming.events.length) {
+      result.events = incoming.events;
+    } else if (Array.isArray(previous.events)) {
+      result.events = previous.events;
+    }
+
+    if (Array.isArray(incoming.substitutions) && incoming.substitutions.length) {
+      result.substitutions = incoming.substitutions;
+    } else if (Array.isArray(previous.substitutions)) {
+      result.substitutions = previous.substitutions;
+    }
+
+    result.fixtureId = String(
+      previous.fixtureId ||
+      incoming.fixtureId ||
+      previous.fixture_id ||
+      incoming.fixture_id ||
+      ""
+    );
+
+    return result;
+  }
+
+  records.forEach(record => {
+    if (!record || typeof record !== "object") return;
+
+    const key = fixtureKey(record);
+
+    if (!key) {
+      withoutFixtureId.push(record);
+      return;
+    }
+
+    if (!mergedByFixture.has(key)) {
+      mergedByFixture.set(key, record);
+    } else {
+      mergedByFixture.set(
+        key,
+        mergeRecord(mergedByFixture.get(key), record)
       );
-      if (fixtureIndex >= 0) {
-        baseRecords[fixtureIndex] = {
-          ...baseRecords[fixtureIndex],
-          ...session,
-          id: String(baseRecords[fixtureIndex].id || fixtureId || session.id),
-          fixtureId,
-          events: Array.isArray(session.events) ? session.events : (baseRecords[fixtureIndex].events || []),
-          substitutions: Array.isArray(session.substitutions) ? session.substitutions : (baseRecords[fixtureIndex].substitutions || [])
-        };
-      } else {
-        baseRecords.push(session);
-      }
-    });
+    }
+  });
 
-    // Keep records without a Match Center session, but collapse repeated fixture
-    // copies written under the app's compatibility storage keys.
-    const merged = [];
-    const seen = new Map();
-    baseRecords.forEach(record => {
-      const id = String(record?.fixtureId || record?.id || record?.matchId || "");
-      if (!id) { merged.push(record); return; }
-      if (!seen.has(id)) {
-        seen.set(id, merged.length);
-        merged.push(record);
-      } else {
-        const index = seen.get(id);
-        const previous = merged[index];
-        // Prefer records with a saved final result and keep event-bearing data.
-        merged[index] = {
-          ...previous,
-          ...((isCompleted(record) && !isCompleted(previous)) ? record : {}),
-          ...(Array.isArray(record.events) && record.events.length ? { events: record.events } : {}),
-          ...(Array.isArray(record.substitutions) && record.substitutions.length ? { substitutions: record.substitutions } : {})
-        };
-      }
-    });
-    state.matches = merged;
-  }
+  sessions.forEach(session => {
+    if (!session || typeof session !== "object") return;
+
+    const key = fixtureKey(session);
+    if (!key) {
+      withoutFixtureId.push(session);
+      return;
+    }
+
+    if (!mergedByFixture.has(key)) {
+      mergedByFixture.set(key, {
+        ...session,
+        fixtureId: key
+      });
+    } else {
+      mergedByFixture.set(
+        key,
+        mergeRecord(mergedByFixture.get(key), session)
+      );
+    }
+  });
+
+  state.matches = [
+    ...mergedByFixture.values(),
+    ...withoutFixtureId
+  ];
+}
 
   function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -225,23 +336,53 @@
   }
 
   function scoreFrom(match, side) {
-    const keys = side === "home"
-      ? ["homeScore", "teamAScore", "team1Score", "scoreA", "homeGoals", "goalsHome"]
-      : ["awayScore", "teamBScore", "team2Score", "scoreB", "awayGoals", "goalsAway"];
-    const direct = firstValue(match, keys, null);
-    if (direct !== null && direct !== "") return numberFrom(direct);
-    const score = match?.score;
-    if (Array.isArray(score)) return numberFrom(score[side === "home" ? 0 : 1]);
-    if (score && typeof score === "object") {
-      return numberFrom(firstValue(score, side === "home"
-        ? ["home", "a", "teamA"] : ["away", "b", "teamB"], 0));
-    }
-    if (typeof score === "string") {
-      const parts = score.match(/\d+/g);
-      if (parts && parts.length >= 2) return numberFrom(parts[side === "home" ? 0 : 1]);
-    }
-    return null;
+  const keys = side === "home"
+    ? [
+        "homeScore", "teamAScore", "team1Score",
+        "scoreA", "homeGoals", "goalsHome"
+      ]
+    : [
+        "awayScore", "teamBScore", "team2Score",
+        "scoreB", "awayGoals", "goalsAway"
+      ];
+
+  const direct = firstValue(match, keys, null);
+
+  if (direct !== null && direct !== "" && Number.isFinite(Number(direct))) {
+    return Number(direct);
   }
+
+  const score = match?.score;
+
+  if (Array.isArray(score)) {
+    const value = score[side === "home" ? 0 : 1];
+    return value === undefined || value === null || value === ""
+      ? null
+      : numberFrom(value);
+  }
+
+  if (score && typeof score === "object") {
+    const value = firstValue(
+      score,
+      side === "home"
+        ? ["home", "a", "teamA"]
+        : ["away", "b", "teamB"],
+      null
+    );
+
+    return value === null ? null : numberFrom(value);
+  }
+
+  if (typeof score === "string") {
+    const parts = score.match(/\d+/g);
+
+    if (parts && parts.length >= 2) {
+      return numberFrom(parts[side === "home" ? 0 : 1]);
+    }
+  }
+
+  return null;
+}
 
   function isCompleted(match) {
     const status = String(firstValue(match, [
@@ -320,45 +461,211 @@
     return matches.filter(isCompleted);
   }
 
-  function getWinner(match) {
-    const homeScore = scoreFrom(match, "home");
-    const awayScore = scoreFrom(match, "away");
-    const explicit = firstValue(match, ["winnerId", "winnerTeamId", "winner", "winningTeamId"], "");
-    if (explicit) {
-      const explicitId = typeof explicit === "object" ? idOf(explicit) : String(explicit);
-      const homeId = teamIdFrom(match, "home");
-      const awayId = teamIdFrom(match, "away");
-      if (explicitId === homeId || String(explicit).toLowerCase() === teamNameFromMatch(match, "home").toLowerCase()) {
-        return { id: homeId, name: teamNameFromMatch(match, "home"), side: "home" };
-      }
-      if (explicitId === awayId || String(explicit).toLowerCase() === teamNameFromMatch(match, "away").toLowerCase()) {
-        return { id: awayId, name: teamNameFromMatch(match, "away"), side: "away" };
-      }
-    }
-    if (homeScore === null || awayScore === null || homeScore === awayScore) return null;
-    return homeScore > awayScore
-      ? { id: teamIdFrom(match, "home"), name: teamNameFromMatch(match, "home"), side: "home" }
-      : { id: teamIdFrom(match, "away"), name: teamNameFromMatch(match, "away"), side: "away" };
+  function penaltyInfo(match) {
+  const fixtureId = String(
+    match?.fixtureId ||
+    match?.fixture_id ||
+    match?.matchId ||
+    match?.id ||
+    ""
+  );
+
+  let saved = null;
+
+  if (fixtureId) {
+    saved = safeParse(
+      localStorage.getItem(`matchcraft_penalty_${fixtureId}`)
+    );
   }
 
-  function getTournamentProgress(matches) {
-    const total = matches.length;
-    const played = completedMatches(matches).length;
-    const finalMatch = matches.find(match =>
-      /final/i.test(String(firstValue(match, [
-        "round", "stage", "matchType", "phase", "bracketRound", "roundName", "name"
-      ], "")))
-    );
-    const finalCompleted = Boolean(finalMatch && isCompleted(finalMatch));
-    return {
-      total,
-      played,
-      percent: total ? Math.round(played / total * 100) : 0,
-      finalMatch,
-      finalCompleted,
-      complete: total > 0 && played === total && finalCompleted
-    };
+  if (!saved || typeof saved !== "object") saved = {};
+
+  const homeDirect = firstValue(match, [
+    "penaltyHomeScore",
+    "homePenaltyScore",
+    "penaltyScoreHome",
+    "homePens"
+  ], null);
+
+  const awayDirect = firstValue(match, [
+    "penaltyAwayScore",
+    "awayPenaltyScore",
+    "penaltyScoreAway",
+    "awayPens"
+  ], null);
+
+  const homeShots = Array.isArray(saved.home) ? saved.home : [];
+  const awayShots = Array.isArray(saved.away) ? saved.away : [];
+
+  const homeFromShots = homeShots.filter(shot => shot?.goal === true).length;
+  const awayFromShots = awayShots.filter(shot => shot?.goal === true).length;
+
+  const hasStoredScore =
+    homeDirect !== null ||
+    awayDirect !== null ||
+    homeShots.length > 0 ||
+    awayShots.length > 0;
+
+  const home = homeDirect !== null
+    ? numberFrom(homeDirect)
+    : homeFromShots;
+
+  const away = awayDirect !== null
+    ? numberFrom(awayDirect)
+    : awayFromShots;
+
+  const rawWinner = firstValue(saved, [
+    "winner",
+    "penaltyWinner",
+    "winnerSide"
+  ], firstValue(match, [
+    "penaltyWinner",
+    "penaltyWinnerTeamId",
+    "penaltyWinnerId"
+  ], ""));
+
+  let winnerSide = "";
+
+  if (String(rawWinner).toLowerCase() === "home") {
+    winnerSide = "home";
+  } else if (String(rawWinner).toLowerCase() === "away") {
+    winnerSide = "away";
+  } else if (rawWinner) {
+    const winnerId = typeof rawWinner === "object"
+      ? idOf(rawWinner)
+      : String(rawWinner);
+
+    if (winnerId && winnerId === teamIdFrom(match, "home")) {
+      winnerSide = "home";
+    } else if (winnerId && winnerId === teamIdFrom(match, "away")) {
+      winnerSide = "away";
+    }
   }
+
+  if (!winnerSide && hasStoredScore && home !== away) {
+    winnerSide = home > away ? "home" : "away";
+  }
+
+  return {
+    home,
+    away,
+    hasScore: hasStoredScore,
+    winnerSide,
+    complete: Boolean(winnerSide)
+  };
+}
+
+function getWinner(match) {
+  if (!match) return null;
+
+  const homeScore = scoreFrom(match, "home");
+  const awayScore = scoreFrom(match, "away");
+
+  const homeId = teamIdFrom(match, "home");
+  const awayId = teamIdFrom(match, "away");
+  const homeName = teamNameFromMatch(match, "home");
+  const awayName = teamNameFromMatch(match, "away");
+
+  const explicit = firstValue(match, [
+    "winnerId",
+    "winnerTeamId",
+    "winningTeamId",
+    "winner"
+  ], "");
+
+  if (explicit) {
+    const explicitId = typeof explicit === "object"
+      ? idOf(explicit)
+      : String(explicit);
+
+    const normalized = String(explicit).toLowerCase();
+
+    if (
+      explicitId === homeId ||
+      normalized === "home" ||
+      normalized === homeName.toLowerCase()
+    ) {
+      return { id: homeId, name: homeName, side: "home" };
+    }
+
+    if (
+      explicitId === awayId ||
+      normalized === "away" ||
+      normalized === awayName.toLowerCase()
+    ) {
+      return { id: awayId, name: awayName, side: "away" };
+    }
+  }
+
+  if (homeScore === null || awayScore === null) return null;
+
+  if (homeScore > awayScore) {
+    return { id: homeId, name: homeName, side: "home" };
+  }
+
+  if (awayScore > homeScore) {
+    return { id: awayId, name: awayName, side: "away" };
+  }
+
+  const pens = penaltyInfo(match);
+
+  if (pens.winnerSide === "home") {
+    return { id: homeId, name: homeName, side: "home" };
+  }
+
+  if (pens.winnerSide === "away") {
+    return { id: awayId, name: awayName, side: "away" };
+  }
+
+  return null;
+}
+
+function isFinalMatch(match) {
+  const labels = [
+    match?.round,
+    match?.stage,
+    match?.matchType,
+    match?.phase,
+    match?.bracketRound,
+    match?.roundName,
+    match?.name
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  // Semi-final and quarter-final must never be treated as the final.
+  if (/semi[\s-]?final|quarter[\s-]?final|উপান্ত্য|কোয়ার্টার/.test(labels)) {
+    return false;
+  }
+
+  return /(^|[\s_-])final($|[\s_-])|grand final|championship final|ফাইনাল/.test(
+    labels
+  );
+}
+
+function getTournamentProgress(matches) {
+  const total = matches.length;
+  const played = completedMatches(matches).length;
+
+  const finals = matches.filter(isFinalMatch);
+
+  const finalMatch = finals.find(isCompleted) ||
+    finals[finals.length - 1] ||
+    null;
+
+  const finalCompleted = Boolean(
+    finalMatch &&
+    isCompleted(finalMatch) &&
+    getWinner(finalMatch)
+  );
+
+  return {
+    total,
+    played,
+    percent: total ? Math.round((played / total) * 100) : 0,
+    finalMatch,
+    finalCompleted,
+    complete: total > 0 && played === total && finalCompleted
+  };
+}
 
   function matchRound(match, index) {
     return String(firstValue(match, [
@@ -524,11 +831,120 @@
   }
 
   function reportUrl(tournamentId) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mcReport", String(tournamentId || state.selectedTournamentId || ""));
-    url.hash = "statistics";
-    return url.toString();
+  const tid = String(
+    tournamentId || state.selectedTournamentId || ""
+  );
+
+  const selectedTournament =
+    state.tournaments.find(t => idOf(t) === tid);
+
+  const matches = matchesForTournament(tid);
+  const teams = teamsForTournament(tid);
+
+  const teamIds = new Set(teams.map(idOf).filter(Boolean));
+  const teamNames = new Set(
+    teams.map(t => nameOf(t).toLowerCase())
+  );
+
+  const players = state.players.filter(player => {
+    const playerTeamId = String(firstValue(player, [
+      "teamId", "teamID", "squadId", "clubId"
+    ], ""));
+
+    const playerTeamName = String(
+      firstValue(player, ["teamName"], "")
+    ).toLowerCase();
+
+    return (
+      (playerTeamId && teamIds.has(playerTeamId)) ||
+      (playerTeamName && teamNames.has(playerTeamName))
+    );
+  });
+
+  const snapshot = {
+    version: 1,
+    tournamentId: tid,
+    tournaments: selectedTournament ? [selectedTournament] : [],
+    teams,
+    players,
+    matches
+  };
+
+  let encoded;
+
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+    let binary = "";
+
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(
+        ...bytes.subarray(i, i + 0x8000)
+      );
+    }
+
+    encoded = btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  } catch (error) {
+    alert("রিপোর্টের ডেটা প্রস্তুত করা যায়নি। আবার চেষ্টা করুন।");
+    return "";
   }
+
+  const url = new URL(window.location.href);
+
+  url.searchParams.delete("mcReport");
+  url.searchParams.set("mcShared", encoded);
+  url.hash = "statistics";
+
+  if (url.toString().length > 7000) {
+    alert(
+      "এই রিপোর্টটি URL-এর মাধ্যমে শেয়ার করার জন্য অনেক বড়। " +
+      "সম্পূর্ণ রিপোর্ট শেয়ার করতে অনলাইন ডেটা স্টোরেজ বা ব্যাকএন্ড প্রয়োজন।"
+    );
+    return "";
+  }
+
+  return url.toString();
+}
+
+function readSharedReportFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const encoded = params.get("mcShared");
+
+  if (!encoded) return null;
+
+  try {
+    const base64 = encoded
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+
+    const binary = atob(
+      base64 + "=".repeat((4 - base64.length % 4) % 4)
+    );
+
+    const bytes = Uint8Array.from(
+      binary,
+      character => character.charCodeAt(0)
+    );
+
+    const data = JSON.parse(new TextDecoder().decode(bytes));
+
+    if (
+      data?.version !== 1 ||
+      !Array.isArray(data.matches) ||
+      !Array.isArray(data.teams) ||
+      !Array.isArray(data.players)
+    ) {
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error("MATCHCRAFT shared report could not be read:", error);
+    return null;
+  }
+}
 
   function ensureRoot() {
     let root = document.getElementById(SECTION_ID);
@@ -623,12 +1039,30 @@
   }
 
   function renderSelectedTournament() {
+    state.sharedReport = readSharedReportFromUrl();
+
     loadData();
+
+    if (state.sharedReport) {
+      state.tournaments = state.sharedReport.tournaments || [];
+      state.teams = state.sharedReport.teams || [];
+      state.players = state.sharedReport.players || [];
+      state.matches = state.sharedReport.matches || [];
+
+      state.selectedTournamentId =
+        String(state.sharedReport.tournamentId || "");
+    }
+
     const root = ensureRoot();
     addRuntimeStyle();
 
-    const queryId = new URLSearchParams(window.location.search).get("mcReport");
-    if (queryId) state.selectedTournamentId = queryId;
+    const queryId = new URLSearchParams(
+  window.location.search
+).get("mcReport");
+
+if (!state.sharedReport && queryId) {
+  state.selectedTournamentId = queryId;
+}
     if (!state.selectedTournamentId && state.tournaments.length) {
       state.selectedTournamentId = idOf(state.tournaments[0]);
     }
@@ -710,14 +1144,22 @@
         <p class="st-note">চ্যাম্পিয়ন দলের খেলোয়াড়দের মধ্যে সংরক্ষিত ম্যাচভিত্তিক পারফরম্যান্স অনুযায়ী; এটি স্বয়ংক্রিয়ভাবে অফিসিয়াল MOTM নয়।</p></div></article>`
       : `<div class="st-empty">Champion দলের খেলোয়াড় ও পারফরম্যান্সের তথ্য পাওয়া গেলে Best Player দেখানো হবে।</div>`;
 
-    const motmCards = completed.map((match, index) => {
+   const motmCards = completed.map((match, index) => {
       const motm = motmForMatch(match);
       const hs = scoreFrom(match, "home"), as = scoreFrom(match, "away");
       const label = matchRound(match, index);
       const name = motm ? nameOf(motm, "নাম সংরক্ষিত নেই") : "MOTM নির্বাচন করা হয়নি";
+
+      // Penalty Shootout score
+      const penalty = penaltyInfo(match);
+      const penaltyMarkup = penalty
+        ? `<div class="st-match__penalty">পেনাল্টি শুটআউট: <strong>${escapeHTML(String(penalty.home))} : ${escapeHTML(String(penalty.away))}</strong></div>`
+        : "";
+
       return `<article class="st-match">
         <div class="st-match__head"><span>${escapeHTML(label)}</span><span>${escapeHTML(matchDate(match))}</span></div>
         <div class="st-scoreline"><strong>${escapeHTML(teamNameFromMatch(match, "home"))}</strong><span class="st-score">${hs === null ? "—" : hs} : ${as === null ? "—" : as}</span><strong>${escapeHTML(teamNameFromMatch(match, "away"))}</strong></div>
+        ${penaltyMarkup}
         <div class="st-match__foot"><span>⭐ ${escapeHTML(name)}</span><button class="st-btn st-btn--soft" data-action="match-details" data-match-id="${escapeHTML(idOf(match))}">বিস্তারিত</button></div>
       </article>`;
     }).join("");
@@ -830,12 +1272,100 @@
 
   function showMatchDetails(matchId) {
     loadData();
-    const match = state.matches.find(m => idOf(m) === String(matchId));
-    if (!match) return openModal("Match Details", `<div class="st-empty">ম্যাচের বিস্তারিত তথ্য পাওয়া যায়নি।</div>`);
-    const events = normalizeArray(firstValue(match, ["events", "matchEvents", "timeline", "incidents"], []));
-    const eventRows = events.map(event => `<tr><td>${escapeHTML(firstValue(event, ["minute", "time", "at"], "—"))}${firstValue(event, ["minute", "time", "at"], "") !== "" ? "′" : ""}</td><td>${escapeHTML(firstValue(event, ["type", "eventType", "kind", "label"], "Event"))}</td><td>${escapeHTML(firstValue(event, ["playerName", "scorer", "actor", "name"], "—"))}${firstValue(event, ["playerId"], "") ? ` <small>(${escapeHTML(firstValue(event, ["playerId"], ""))})</small>` : ""}</td><td>${escapeHTML(firstValue(event, ["assistPlayerName", "assistName", "assistPlayerId", "assist"], "—"))}</td><td>${escapeHTML(firstValue(event, ["teamName", "teamSide"], "—"))}</td></tr>`).join("");
-    const hs = scoreFrom(match, "home"), as = scoreFrom(match, "away");
-    openModal(`${matchRound(match, 0)} — Match Details`, `<div class="st-empty"><strong>${escapeHTML(teamNameFromMatch(match,"home"))} ${hs ?? "—"} : ${as ?? "—"} ${escapeHTML(teamNameFromMatch(match,"away"))}</strong><br>${escapeHTML(matchDate(match))}</div><h3>Recorded Events</h3><div class="st-table-wrap"><table class="st-table"><thead><tr><th>Minute</th><th>Event</th><th>Player</th><th>Assist</th><th>Team</th></tr></thead><tbody>${eventRows || `<tr><td colspan="5">এই ম্যাচের জন্য কোনো event/scorer/assist তথ্য সংরক্ষিত নেই।</td></tr>`}</tbody></table></div><p class="st-note">এই বিবরণে শুধু ম্যাচ ডেটায় সংরক্ষিত event দেখানো হচ্ছে।</p>`);
+
+    const match = state.matches.find(m =>
+      idOf(m) === String(matchId) ||
+      String(m.fixtureId || m.fixture_id || m.matchId || "") === String(matchId)
+    );
+
+    if (!match) {
+      return openModal(
+        "Match Details",
+        `<div class="st-empty">ম্যাচের বিস্তারিত তথ্য পাওয়া যায়নি।</div>`
+      );
+    }
+
+    const events = normalizeArray(
+      firstValue(match, ["events", "matchEvents", "timeline", "incidents"], [])
+    );
+
+    const eventRows = events.map(event => `
+      <tr>
+        <td>${escapeHTML(firstValue(event, ["minute", "time", "at"], "—"))}${firstValue(event, ["minute", "time", "at"], "") !== "" ? "′" : ""}</td>
+        <td>${escapeHTML(firstValue(event, ["type", "eventType", "kind", "label"], "Event"))}</td>
+        <td>${escapeHTML(firstValue(event, ["playerName", "scorer", "actor", "name"], "—"))}${firstValue(event, ["playerId"], "") ? ` <small>(${escapeHTML(firstValue(event, ["playerId"], ""))})</small>` : ""}</td>
+        <td>${escapeHTML(firstValue(event, ["assistPlayerName", "assistName", "assistPlayerId", "assist"], "—"))}</td>
+        <td>${escapeHTML(firstValue(event, ["teamName", "teamSide"], "—"))}</td>
+      </tr>
+    `).join("");
+
+    const hs = scoreFrom(match, "home");
+    const as = scoreFrom(match, "away");
+
+    // Penalty shootout details
+    const penalty = penaltyInfo(match);
+
+    const penaltyMarkup = penalty && penalty.hasScore
+      ? `
+        <div class="st-empty" style="margin-top:12px">
+          <strong>⚽ পেনাল্টি শুটআউট</strong>
+          <div style="font-size:20px;margin:10px 0">
+            ${escapeHTML(teamNameFromMatch(match, "home"))}
+            <strong>(${penalty.home})</strong>
+            &nbsp; : &nbsp;
+            <strong>(${penalty.away})</strong>
+            ${escapeHTML(teamNameFromMatch(match, "away"))}
+          </div>
+          ${
+            penalty.winnerSide
+              ? `<p style="margin:8px 0 0;color:#65e5b6">
+                   🏆 পেনাল্টিতে বিজয়ী:
+                   <strong>${escapeHTML(teamNameFromMatch(match, penalty.winnerSide))}</strong>
+                 </p>`
+              : `<p style="margin:8px 0 0">পেনাল্টির বিজয়ী নিশ্চিত নয়।</p>`
+          }
+        </div>
+      `
+      : "";
+
+    openModal(
+      `${matchRound(match, 0)} — Match Details`,
+      `
+        <div class="st-empty">
+          <strong>
+            ${escapeHTML(teamNameFromMatch(match, "home"))}
+            ${hs ?? "—"} : ${as ?? "—"}
+            ${escapeHTML(teamNameFromMatch(match, "away"))}
+          </strong>
+          <br>
+          ${escapeHTML(matchDate(match))}
+        </div>
+
+        ${penaltyMarkup}
+
+        <h3>Recorded Events</h3>
+        <div class="st-table-wrap">
+          <table class="st-table">
+            <thead>
+              <tr>
+                <th>Minute</th>
+                <th>Event</th>
+                <th>Player</th>
+                <th>Assist</th>
+                <th>Team</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${eventRows || `<tr><td colspan="5">এই ম্যাচের জন্য কোনো event/scorer/assist তথ্য সংরক্ষিত নেই।</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+
+        <p class="st-note">
+          এই বিবরণে ম্যাচের সংরক্ষিত ইভেন্ট এবং পেনাল্টি শুটআউটের তথ্য দেখানো হচ্ছে।
+        </p>
+      `
+    );
   }
 
   function handleAction(actionElement) {
@@ -861,6 +1391,7 @@
 
   function copyReportLink() {
     const link = reportUrl(state.selectedTournamentId);
+    if (!link) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(link)
         .then(() => alert("Report link কপি হয়েছে।"))
