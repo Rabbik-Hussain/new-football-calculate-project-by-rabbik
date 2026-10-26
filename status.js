@@ -33,7 +33,7 @@
     ]
   };
 
-  const state = {
+ const state = {
     selectedTournamentId: "",
     tournaments: [],
     teams: [],
@@ -41,8 +41,11 @@
     matches: [],
     sharedReport: null,
     modal: null,
-    autoOpenedTeam: ""
-  };
+    autoOpenedTeam: "",
+    remoteReport: null,
+    remoteReportId: "",
+    remoteReportLoading: false
+};
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -830,21 +833,21 @@ function getTournamentProgress(matches) {
     return nested && typeof nested === "object" ? nested : null;
   }
 
-  function reportUrl(tournamentId) {
-  const tid = String(
-    tournamentId || state.selectedTournamentId || ""
-  );
+async function reportUrl(tournamentId) {
+  const tid = String(tournamentId || state.selectedTournamentId || "");
+
+  if (!tid) {
+    alert("প্রথমে একটি টুর্নামেন্ট নির্বাচন করুন।");
+    return "";
+  }
 
   const selectedTournament =
     state.tournaments.find(t => idOf(t) === tid);
 
   const matches = matchesForTournament(tid);
   const teams = teamsForTournament(tid);
-
   const teamIds = new Set(teams.map(idOf).filter(Boolean));
-  const teamNames = new Set(
-    teams.map(t => nameOf(t).toLowerCase())
-  );
+  const teamNames = new Set(teams.map(t => nameOf(t).toLowerCase()));
 
   const players = state.players.filter(player => {
     const playerTeamId = String(firstValue(player, [
@@ -870,42 +873,36 @@ function getTournamentProgress(matches) {
     matches
   };
 
-  let encoded;
-
   try {
-    const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
-    let binary = "";
+    const response = await fetch("/.netlify/functions/reports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot)
+    });
 
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode(
-        ...bytes.subarray(i, i + 0x8000)
-      );
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok || !result.id) {
+      throw new Error(result.error || "রিপোর্ট সংরক্ষণ করা যায়নি।");
     }
 
-    encoded = btoa(binary)
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
+    const url = new URL(window.location.href);
+    url.searchParams.delete("mcShared");
+    url.searchParams.delete("mcReport");
+    url.searchParams.set("mcReportId", result.id);
+    url.hash = "statistics";
+
+    return url.toString();
   } catch (error) {
-    alert("রিপোর্টের ডেটা প্রস্তুত করা যায়নি। আবার চেষ্টা করুন।");
-    return "";
-  }
+    console.error("MATCHCRAFT report share failed:", error);
 
-  const url = new URL(window.location.href);
-
-  url.searchParams.delete("mcReport");
-  url.searchParams.set("mcShared", encoded);
-  url.hash = "statistics";
-
-  if (url.toString().length > 7000) {
     alert(
-      "এই রিপোর্টটি URL-এর মাধ্যমে শেয়ার করার জন্য অনেক বড়। " +
-      "সম্পূর্ণ রিপোর্ট শেয়ার করতে অনলাইন ডেটা স্টোরেজ বা ব্যাকএন্ড প্রয়োজন।"
+      error.message ||
+      "রিপোর্ট অনলাইনে সংরক্ষণ করা যায়নি। Netlify ও Supabase সেটিংস পরীক্ষা করুন।"
     );
+
     return "";
   }
-
-  return url.toString();
 }
 
 function readSharedReportFromUrl() {
@@ -1038,10 +1035,65 @@ function readSharedReportFromUrl() {
     renderSelectedTournament();
   }
 
-  function renderSelectedTournament() {
-    state.sharedReport = readSharedReportFromUrl();
+ function renderSelectedTournament() {
+  const params = new URLSearchParams(window.location.search);
+  const remoteId = params.get("mcReportId");
 
-    loadData();
+  if (remoteId && state.remoteReportId !== remoteId) {
+    state.remoteReportId = remoteId;
+    state.remoteReport = null;
+    state.remoteReportLoading = true;
+
+    const root = ensureRoot();
+    addRuntimeStyle();
+
+    root.innerHTML = `
+      <div class="st-page">
+        <div class="st-empty">
+          রিপোর্ট অনলাইন থেকে লোড হচ্ছে...
+        </div>
+      </div>
+    `;
+
+    fetch(
+      `/.netlify/functions/reports?id=${encodeURIComponent(remoteId)}`
+    )
+      .then(async response => {
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok || !data.report) {
+          throw new Error(data.error || "রিপোর্ট পাওয়া যায়নি।");
+        }
+
+        return data.report;
+      })
+      .then(report => {
+        state.remoteReport = report;
+        state.remoteReportLoading = false;
+        renderSelectedTournament();
+      })
+      .catch(error => {
+        console.error("MATCHCRAFT shared report load failed:", error);
+
+        state.remoteReportLoading = false;
+
+        root.innerHTML = `
+          <div class="st-page">
+            <div class="st-empty">
+              <strong>রিপোর্ট লোড করা যায়নি</strong>
+              <p>${escapeHTML(error.message || "লিংকটি পরীক্ষা করুন।")}</p>
+            </div>
+          </div>
+        `;
+      });
+
+    return;
+  }
+
+  state.sharedReport =
+    state.remoteReport || readSharedReportFromUrl();
+
+  loadData();
 
     if (state.sharedReport) {
       state.tournaments = state.sharedReport.tournaments || [];
@@ -1389,17 +1441,21 @@ if (!state.sharedReport && queryId) {
     }
   }
 
-  function copyReportLink() {
-    const link = reportUrl(state.selectedTournamentId);
-    if (!link) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(link)
-        .then(() => alert("Report link কপি হয়েছে।"))
-        .catch(() => fallbackCopy(link));
-    } else {
+  async function copyReportLink() {
+  const link = await reportUrl(state.selectedTournamentId);
+  if (!link) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(link);
+      alert("Report link কপি হয়েছে।");
+    } catch (_) {
       fallbackCopy(link);
     }
+  } else {
+    fallbackCopy(link);
   }
+}
 
   function fallbackCopy(value) {
     const field = document.createElement("textarea");
@@ -1417,29 +1473,69 @@ if (!state.sharedReport && queryId) {
     field.remove();
   }
 
-  function shareReport() {
-    const link = reportUrl(state.selectedTournamentId);
-    const title = "MATCHCRAFT Statistics & Awards";
-    if (navigator.share) {
-      navigator.share({ title, text: "Tournament report", url: link }).catch(() => {});
-    } else copyReportLink();
-  }
+  async function shareReport() {
+  const link = await reportUrl(state.selectedTournamentId);
+  if (!link) return;
 
-  function showQrCode() {
-    const link = reportUrl(state.selectedTournamentId);
-    const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=12&data=" + encodeURIComponent(link);
-    openModal("Tournament Report QR Code", `
-      <div class="st-qr-panel">
-        <p>এই QR Code স্ক্যান করলে Statistics &amp; Awards পেজের URL খুলবে।</p>
-        <div class="st-qr-image-wrap"><img class="st-qr-image" src="${escapeHTML(qrUrl)}" alt="Tournament report QR Code" loading="lazy"></div>
-        <p class="st-qr-url">${escapeHTML(link)}</p>
-        <div class="st-qr-actions">
-          <button class="st-btn" data-action="copy-report-link">Copy Report URL</button>
-          <button class="st-btn st-btn--soft" data-action="share">Share Report</button>
-        </div>
-        <p class="st-note">গুরুত্বপূর্ণ: QR Code শুধু URL খুলবে। অন্য ডিভাইসে এই ব্রাউজারের LocalStorage ডেটা স্বয়ংক্রিয়ভাবে যাবে না। রিপোর্ট অন্য ডিভাইসে দেখাতে হলে ডেটা শেয়ার করার জন্য পাবলিক ডেটা/ব্যাকএন্ড বা আলাদা export/import ব্যবস্থা লাগবে।</p>
-      </div>`);
+  const title = "MATCHCRAFT Statistics & Awards";
+
+  if (navigator.share) {
+    try {
+      await navigator.share({
+        title,
+        text: "Tournament report",
+        url: link
+      });
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        fallbackCopy(link);
+      }
+    }
+  } else {
+    fallbackCopy(link);
   }
+}
+
+ async function showQrCode() {
+  const link = await reportUrl(state.selectedTournamentId);
+  if (!link) return;
+
+  const qrUrl =
+    "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=12&data=" +
+    encodeURIComponent(link);
+
+  openModal("Tournament Report QR Code", `
+    <div class="st-qr-panel">
+      <p>QR Code স্ক্যান করে এই টুর্নামেন্টের read-only রিপোর্ট দেখুন।</p>
+
+      <div class="st-qr-image-wrap">
+        <img
+          class="st-qr-image"
+          src="${escapeHTML(qrUrl)}"
+          alt="Tournament report QR Code"
+          loading="lazy"
+        >
+      </div>
+
+      <p class="st-qr-url">${escapeHTML(link)}</p>
+
+      <div class="st-qr-actions">
+        <button class="st-btn" data-action="copy-report-link">
+          Copy Report URL
+        </button>
+        <button class="st-btn st-btn--soft" data-action="share">
+          Share Report
+        </button>
+      </div>
+
+      <p class="st-note">
+        এটি অনলাইনে সংরক্ষিত রিপোর্টের একটি read-only লিংক।
+        QR স্ক্যান করে অন্য ফোনে রিপোর্ট দেখা যাবে।
+        মূল MATCHCRAFT-এর ডেটা এখানে সম্পাদনা করা যাবে না।
+      </p>
+    </div>
+  `);
+}
 
   function handleChange(event) {
     if (event.target && event.target.id === "stTournamentSelect") {
